@@ -1,27 +1,27 @@
 <?php
 /**
- * Plugin Name: WooCommerce Valheim RCON
- * Description: Valheim RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Version corrigée avec GitHub Updater
+ * Plugin Name: WooCommerce Server Game RCON
+ * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Version corrigée avec GitHub Updater
  * Version: 1.0.0
  * Author: Skylide
  * Requires PHP: 7.4
- * GitHub Plugin URI: skylidefr/Steam-Server-Status-SourceQuery-PHP
+ * GitHub Plugin URI: skylidefr/WooCommerce-Server-Game-RCON
  * GitHub Branch: main
- * Author URI: https://github.com/skylidefr/WooCommerce-Valheim-RCON/
+ * Author URI: https://github.com/skylidefr/WooCommerce-Server-Game-RCON/
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-if (!class_exists('WC_Valheim_RCON_Fixed')) {
+if (!class_exists('WC_Server_Game_RCON')) {
 
-class WC_Valheim_RCON_Fixed {
+class WC_Server_Game_RCON {
 
-    private $option_name = 'valheim_rcon_settings';
+    private $option_name = 'server_game_rcon_settings';
     private $log_file;
-    private $hook_retry = 'valheim_rcon_retry_failed';
-    private $history_meta = '_valheim_rcon_log';
+    private $hook_retry = 'server_game_rcon_retry_failed';
+    private $history_meta = '_server_game_rcon_log';
     private $max_history_entries = 50;
     private $max_command_length = 500;
     private $plugin_file;
@@ -31,14 +31,14 @@ class WC_Valheim_RCON_Fixed {
         $this->plugin_file = __FILE__;
         
         $upload_dir = wp_upload_dir();
-        $this->log_file = trailingslashit($upload_dir['basedir']) . 'valheim-rcon-debug.log';
+        $this->log_file = trailingslashit($upload_dir['basedir']) . 'server-game-rcon-debug.log';
 
         register_activation_hook(__FILE__, [$this, 'on_activation']);
         register_deactivation_hook(__FILE__, [$this, 'on_deactivation']);
 
         // Système de mise à jour GitHub
         if (is_admin()) {
-            new ValheimRCONGitHubUpdater($this->plugin_file);
+            new ServerGameRCONGitHubUpdater($this->plugin_file);
         }
 
         // Admin & settings
@@ -59,7 +59,7 @@ class WC_Valheim_RCON_Fixed {
 
         // Checkout extras (optional)
         add_action('woocommerce_after_checkout_billing_form', [$this, 'add_billing_custom_fields']);
-        add_action('woocommerce_checkout_process', [$this, 'validate_valheim_username']);
+        add_action('woocommerce_checkout_process', [$this, 'validate_game_username']);
         add_action('woocommerce_checkout_create_order', [$this, 'save_custom_checkout_fields_new'], 10, 2);
 
         // Admin list columns
@@ -68,14 +68,14 @@ class WC_Valheim_RCON_Fixed {
         add_action('manage_woocommerce_page_wc-orders_custom_column', [$this, 'render_order_columns_hpos'], 10, 2);
 
         // AJAX & retry
-        add_action('wp_ajax_valheim_test_rcon_connection', [$this, 'ajax_test_rcon_connection']);
-        add_action('wp_ajax_valheim_send_rcon_manual', [$this, 'ajax_send_rcon_manual']);
-        add_action('wp_ajax_valheim_reset_rcon_status', [$this, 'ajax_reset_rcon_status']);
-        add_action('wp_ajax_valheim_clear_logs', [$this, 'ajax_clear_logs']);
+        add_action('wp_ajax_server_game_test_rcon_connection', [$this, 'ajax_test_rcon_connection']);
+        add_action('wp_ajax_server_game_send_rcon_manual', [$this, 'ajax_send_rcon_manual']);
+        add_action('wp_ajax_server_game_reset_rcon_status', [$this, 'ajax_reset_rcon_status']);
+        add_action('wp_ajax_server_game_clear_logs', [$this, 'ajax_clear_logs']);
         add_action($this->hook_retry, [$this, 'retry_failed_commands'], 10, 1);
 
         // Cleanup scheduled task
-        add_action('valheim_rcon_cleanup_logs', [$this, 'cleanup_old_logs']);
+        add_action('server_game_rcon_cleanup_logs', [$this, 'cleanup_old_logs']);
     }
 
     /**
@@ -91,17 +91,17 @@ class WC_Valheim_RCON_Fixed {
 
     public function on_activation() {
         if (!file_exists($this->log_file)) {
-            @file_put_contents($this->log_file, "Valheim RCON log created: " . date('c') . PHP_EOL);
+            @file_put_contents($this->log_file, "Server Game RCON log created: " . date('c') . PHP_EOL);
         }
         
         // Schedule cleanup task
-        if (!wp_next_scheduled('valheim_rcon_cleanup_logs')) {
-            wp_schedule_event(time(), 'weekly', 'valheim_rcon_cleanup_logs');
+        if (!wp_next_scheduled('server_game_rcon_cleanup_logs')) {
+            wp_schedule_event(time(), 'weekly', 'server_game_rcon_cleanup_logs');
         }
     }
 
     public function on_deactivation() {
-        wp_clear_scheduled_hook('valheim_rcon_cleanup_logs');
+        wp_clear_scheduled_hook('server_game_rcon_cleanup_logs');
         wp_clear_scheduled_hook($this->hook_retry);
     }
 
@@ -138,18 +138,18 @@ class WC_Valheim_RCON_Fixed {
     /* ---------------- Admin: menu & settings ---------------- */
 
     public function add_admin_menu() {
-        add_options_page('Valheim RCON', 'Valheim RCON', 'manage_options', 'valheim-rcon', [$this, 'options_page']);
+        add_options_page('Server Game RCON', 'Server Game RCON', 'manage_options', 'server-game-rcon', [$this, 'options_page']);
     }
 
     public function settings_init() {
-        register_setting('valheim_rcon_group', $this->option_name, [$this, 'sanitize_settings']);
-        add_settings_section('valheim_rcon_section', 'Connexion RCON', null, 'valheimRcon');
-        add_settings_field('servers', 'Serveurs RCON', [$this, 'field_servers_render'], 'valheimRcon', 'valheim_rcon_section');
-        add_settings_field('timeout', 'Timeout (s)', [$this, 'field_timeout_render'], 'valheimRcon', 'valheim_rcon_section');
-        add_settings_field('enable_username_field', 'Champ pseudo', [$this, 'field_enable_username_render'], 'valheimRcon', 'valheim_rcon_section');
-        add_settings_field('verify_player_exists', 'Vérification joueur', [$this, 'field_verify_player_render'], 'valheimRcon', 'valheim_rcon_section');
-        add_settings_field('auto_retry', 'Retry failed', [$this, 'field_auto_retry_render'], 'valheimRcon', 'valheim_rcon_section');
-        add_settings_field('debug', 'Debug', [$this, 'field_debug_render'], 'valheimRcon', 'valheim_rcon_section');
+        register_setting('server_game_rcon_group', $this->option_name, [$this, 'sanitize_settings']);
+        add_settings_section('server_game_rcon_section', 'Connexion RCON', null, 'serverGameRcon');
+        add_settings_field('servers', 'Serveurs RCON', [$this, 'field_servers_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('timeout', 'Timeout (s)', [$this, 'field_timeout_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('enable_username_field', 'Champ pseudo', [$this, 'field_enable_username_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('verify_player_exists', 'Vérification joueur', [$this, 'field_verify_player_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('auto_retry', 'Retry failed', [$this, 'field_auto_retry_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('debug', 'Debug', [$this, 'field_debug_render'], 'serverGameRcon', 'server_game_rcon_section');
     }
 
     public function sanitize_settings($input) {
@@ -224,10 +224,10 @@ class WC_Valheim_RCON_Fixed {
 
     public function field_enable_username_render() {
         $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo Valheim au checkout', 
+        printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo de jeu au checkout', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_username_field']), true, false));
-        echo '<p class="description">Si activé, les clients devront saisir leur pseudo Valheim lors de la commande.</p>';
+        echo '<p class="description">Si activé, les clients devront saisir leur pseudo de jeu lors de la commande.</p>';
     }
 
     public function field_servers_render() {
@@ -239,7 +239,7 @@ class WC_Valheim_RCON_Fixed {
         <tr>
             <th scope="row"><label>Serveurs RCON</label></th>
             <td>
-                <table id="valheim-rcon-servers-table" class="widefat" style="max-width:900px;">
+                <table id="server-game-rcon-servers-table" class="widefat" style="max-width:900px;">
                     <thead>
                         <tr>
                             <th style="width:18%;">Nom</th>
@@ -253,9 +253,9 @@ class WC_Valheim_RCON_Fixed {
                     <tbody></tbody>
                 </table>
                 <p>
-                    <button type="button" class="button" id="valheim-add-rcon-server">+ Ajouter un serveur</button>
+                    <button type="button" class="button" id="server-game-add-rcon-server">+ Ajouter un serveur</button>
                 </p>
-                <input type="hidden" name="<?php echo esc_attr($this->option_name); ?>[servers]" id="valheim_rcon_servers" value="<?php echo esc_attr($json); ?>" />
+                <input type="hidden" name="<?php echo esc_attr($this->option_name); ?>[servers]" id="server_game_rcon_servers" value="<?php echo esc_attr($json); ?>" />
                 <p class="description">Ajoutez, supprimez ou éditez les serveurs. Les modifications seront sauvegardées à l'enregistrement de la page.</p>
             </td>
         </tr>
@@ -263,8 +263,8 @@ class WC_Valheim_RCON_Fixed {
 
         <script>
         jQuery(document).ready(function($){
-            const tbody = $('#valheim-rcon-servers-table tbody');
-            const input = $('#valheim_rcon_servers');
+            const tbody = $('#server-game-rcon-servers-table tbody');
+            const input = $('#server_game_rcon_servers');
 
             function rowHtml(srv, idx) {
                 const escapedName = (srv.name || '').replace(/"/g, '&quot;');
@@ -292,10 +292,10 @@ class WC_Valheim_RCON_Fixed {
             }
 
             function bindEvents() {
-                tbody.find('input').off('input.valheim').on('input.valheim', function(){
+                tbody.find('input').off('input.server_game').on('input.server_game', function(){
                     saveFromUI();
                 });
-                tbody.find('.srv-remove').off('click.valheim').on('click.valheim', function(e){
+                tbody.find('.srv-remove').off('click.server_game').on('click.server_game', function(e){
                     e.preventDefault();
                     const tr = $(this).closest('tr');
                     const idx = tr.index();
@@ -330,7 +330,7 @@ class WC_Valheim_RCON_Fixed {
                 input.val(JSON.stringify(servers));
             }
 
-            $('#valheim-add-rcon-server').off('click.valheim').on('click.valheim', function(e){
+            $('#server-game-add-rcon-server').off('click.server_game').on('click.server_game', function(e){
                 e.preventDefault();
                 let servers = [];
                 try { servers = JSON.parse(input.val()); } catch(e) { servers = []; }
@@ -350,7 +350,7 @@ class WC_Valheim_RCON_Fixed {
         printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur avant validation de commande', 
                esc_attr($this->option_name), 
                checked(!empty($opts['verify_player_exists']), true, false));
-        echo '<p class="description">Si activé, le plugin vérifiera que le pseudo Valheim saisi existe bien sur le serveur avant de valider la commande.</p>';
+        echo '<p class="description">Si activé, le plugin vérifiera que le pseudo de jeu saisi existe bien sur le serveur avant de valider la commande.</p>';
     }
 
     public function field_auto_retry_render() {
@@ -367,7 +367,7 @@ class WC_Valheim_RCON_Fixed {
         if (!current_user_can('manage_options')) return;
         
         // Vérifier s'il y a une mise à jour
-        $updater = new ValheimRCONGitHubUpdater($this->plugin_file);
+        $updater = new ServerGameRCONGitHubUpdater($this->plugin_file);
         $has_update = false;
         $new_version = '';
         
@@ -379,7 +379,7 @@ class WC_Valheim_RCON_Fixed {
         }
         ?>
         <div class="wrap">
-            <h1>Valheim RCON</h1>
+            <h1>Server Game RCON</h1>
             
             <!-- Section de mise à jour -->
             <div class="notice notice-info">
@@ -393,18 +393,18 @@ class WC_Valheim_RCON_Fixed {
             
             <form method="post" action="options.php">
                 <?php
-                settings_fields('valheim_rcon_group');
-                do_settings_sections('valheimRcon');
+                settings_fields('server_game_rcon_group');
+                do_settings_sections('serverGameRcon');
                 submit_button('Enregistrer');
                 ?>
             </form>
 
-            <p><button id="valheim-test-rcon" class="button button-secondary">Tester la connexion</button></p>
+            <p><button id="server-game-test-rcon" class="button button-secondary">Tester la connexion</button></p>
 
             <h2>Logs</h2>
             <?php if (file_exists($this->log_file)): ?>
                 <textarea readonly style="width:100%;height:300px;font-family:monospace;"><?php echo esc_textarea(file_get_contents($this->log_file)); ?></textarea>
-                <p><button id="valheim-clear-logs" class="button button-secondary">Vider les logs</button></p>
+                <p><button id="server-game-clear-logs" class="button button-secondary">Vider les logs</button></p>
             <?php else: ?>
                 <p>Aucun log</p>
             <?php endif; ?>
@@ -413,25 +413,25 @@ class WC_Valheim_RCON_Fixed {
     }
 
     public function enqueue_admin_scripts($hook) {
-        if (!in_array($hook, ['settings_page_valheim-rcon', 'post.php', 'post-new.php', 'woocommerce_page_wc-orders'])) {
+        if (!in_array($hook, ['settings_page_server-game-rcon', 'post.php', 'post-new.php', 'woocommerce_page_wc-orders'])) {
             return;
         }
         
         wp_enqueue_script('jquery');
-        $nonce_test = wp_create_nonce('valheim_test_rcon_nonce');
-        $nonce_send = wp_create_nonce('valheim_send_rcon_manual');
-        $nonce_reset = wp_create_nonce('valheim_reset_rcon_status');
+        $nonce_test = wp_create_nonce('server_game_test_rcon_nonce');
+        $nonce_send = wp_create_nonce('server_game_send_rcon_manual');
+        $nonce_reset = wp_create_nonce('server_game_reset_rcon_status');
         
         $script = <<<JS
         jQuery(document).ready(function($){
-            $('#valheim-test-rcon').off('click.valheim').on('click.valheim', function(e){
+            $('#server-game-test-rcon').off('click.server_game').on('click.server_game', function(e){
                 e.preventDefault();
                 var button = $(this);
                 var original = button.text();
                 
                 var servers = [];
                 try {
-                    servers = JSON.parse($('#valheim_rcon_servers').val() || '[]');
+                    servers = JSON.parse($('#server_game_rcon_servers').val() || '[]');
                 } catch(e) {
                     servers = [];
                 }
@@ -446,7 +446,7 @@ class WC_Valheim_RCON_Fixed {
                 
                 button.prop('disabled', true).text('Test en cours...');
                 $.post(ajaxurl, {
-                    action: 'valheim_test_rcon_connection',
+                    action: 'server_game_test_rcon_connection',
                     nonce: '{$nonce_test}',
                     host: server.host || '',
                     port: server.port || '',
@@ -465,7 +465,7 @@ class WC_Valheim_RCON_Fixed {
                 });
             });
 
-            $(document).off('click.valheim', '.valheim-send-rcon').on('click.valheim', '.valheim-send-rcon', function(e){
+            $(document).off('click.server_game', '.server-game-send-rcon').on('click.server_game', '.server-game-send-rcon', function(e){
                 e.preventDefault();
                 if (!confirm('Renvoyer les commandes RCON pour cette commande ?')) return;
                 var orderId = $(this).data('order-id');
@@ -473,7 +473,7 @@ class WC_Valheim_RCON_Fixed {
                 var orig = btn.text();
                 btn.prop('disabled', true).text('Envoi...');
                 $.post(ajaxurl, {
-                    action: 'valheim_send_rcon_manual',
+                    action: 'server_game_send_rcon_manual',
                     nonce: '{$nonce_send}',
                     order_id: orderId
                 }, function(resp){
@@ -490,7 +490,7 @@ class WC_Valheim_RCON_Fixed {
                 });
             });
             
-            $(document).off('click.valheim', '.valheim-reset-rcon').on('click.valheim', '.valheim-reset-rcon', function(e){
+            $(document).off('click.server_game', '.server-game-reset-rcon').on('click.server_game', '.server-game-reset-rcon', function(e){
                 e.preventDefault();
                 if (!confirm('Réinitialiser le statut d\\'envoi RCON pour cette commande ?\\n\\nCeci permettra au système de renvoyer automatiquement les commandes.')) return;
                 var orderId = $(this).data('order-id');
@@ -498,7 +498,7 @@ class WC_Valheim_RCON_Fixed {
                 var orig = btn.text();
                 btn.prop('disabled', true).text('Reset...');
                 $.post(ajaxurl, {
-                    action: 'valheim_reset_rcon_status',
+                    action: 'server_game_reset_rcon_status',
                     nonce: '{$nonce_reset}',
                     order_id: orderId
                 }, function(resp){
@@ -515,11 +515,11 @@ class WC_Valheim_RCON_Fixed {
                 });
             });
 
-            $('#valheim-clear-logs').off('click.valheim').on('click.valheim', function(e){
+            $('#server-game-clear-logs').off('click.server_game').on('click.server_game', function(e){
                 e.preventDefault();
                 if (confirm('Êtes-vous sûr de vouloir vider les logs ?')) {
                     $.post(ajaxurl, {
-                        action: 'valheim_clear_logs',
+                        action: 'server_game_clear_logs',
                         nonce: '{$nonce_test}'
                     }, function(resp){
                         if (resp && resp.success) {
@@ -537,23 +537,23 @@ JS;
     /* ---------------- Product metabox ---------------- */
 
     public function add_product_metabox() {
-        add_meta_box('valheim_rcon_product', 'Valheim RCON', [$this, 'render_product_metabox'], 'product', 'side', 'default');
+        add_meta_box('server_game_rcon_product', 'Server Game RCON', [$this, 'render_product_metabox'], 'product', 'side', 'default');
     }
 
     public function render_product_metabox($post) {
-        wp_nonce_field('valheim_rcon_product_save', 'valheim_rcon_product_nonce');
-        $commands = get_post_meta($post->ID, '_valheim_rcon_commands', true);
+        wp_nonce_field('server_game_rcon_product_save', 'server_game_rcon_product_nonce');
+        $commands = get_post_meta($post->ID, '_server_game_rcon_commands', true);
         if (is_array($commands)) $value = implode("\n", $commands);
         else if (is_string($commands)) $value = $commands; 
         else $value = '';
 
         $opts = get_option($this->option_name, []);
         $servers = $opts['servers'] ?? [];
-        $selected_server = get_post_meta($post->ID, '_valheim_rcon_server', true);
+        $selected_server = get_post_meta($post->ID, '_server_game_rcon_server', true);
         ?>
         <p><label>Serveur RCON</label></p>
         <p>
-            <select name="valheim_rcon_server" style="width:100%;">
+            <select name="server_game_rcon_server" style="width:100%;">
                 <option value="" <?php selected($selected_server, ''); ?>>Par défaut</option>
                 <option value="all" <?php selected($selected_server, 'all'); ?>>Tous les serveurs</option>
                 <?php
@@ -568,28 +568,28 @@ JS;
         </p>
 
         <p><label>Commandes RCON (une par ligne)</label></p>
-        <p><textarea name="valheim_rcon_commands" style="width:100%;height:120px;" maxlength="<?php echo $this->max_command_length * 10; ?>"><?php echo esc_textarea($value); ?></textarea></p>
-        <p class="description">Variables: {valheim_username}, {billing_first_name}, {billing_last_name}, {billing_email}, {order_id}</p>
+        <p><textarea name="server_game_rcon_commands" style="width:100%;height:120px;" maxlength="<?php echo $this->max_command_length * 10; ?>"><?php echo esc_textarea($value); ?></textarea></p>
+        <p class="description">Variables: {game_username}, {billing_first_name}, {billing_last_name}, {billing_email}, {order_id}</p>
         <?php
     }
 
     public function save_product_metabox($post_id) {
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
         if (!current_user_can('edit_post', $post_id)) return;
-        if (empty($_POST['valheim_rcon_product_nonce']) || !wp_verify_nonce($_POST['valheim_rcon_product_nonce'], 'valheim_rcon_product_save')) return;
+        if (empty($_POST['server_game_rcon_product_nonce']) || !wp_verify_nonce($_POST['server_game_rcon_product_nonce'], 'server_game_rcon_product_save')) return;
         
-        $raw = sanitize_textarea_field($_POST['valheim_rcon_commands'] ?? '');
+        $raw = sanitize_textarea_field($_POST['server_game_rcon_commands'] ?? '');
         $lines = array_filter(array_map('trim', explode("\n", $raw)), function($l){ 
             return $l !== '' && strlen($l) <= $this->max_command_length; 
         });
         
-        update_post_meta($post_id, '_valheim_rcon_commands', $lines);
+        update_post_meta($post_id, '_server_game_rcon_commands', $lines);
         
-        $server_sel = sanitize_text_field($_POST['valheim_rcon_server'] ?? '');
+        $server_sel = sanitize_text_field($_POST['server_game_rcon_server'] ?? '');
         if (!in_array($server_sel, ['', 'all']) && !is_numeric($server_sel)) {
             $server_sel = '';
         }
-        update_post_meta($post_id, '_valheim_rcon_server', $server_sel);
+        update_post_meta($post_id, '_server_game_rcon_server', $server_sel);
     }
 
     /* ---------------- Order UI: manual send button & history ---------------- */
@@ -598,20 +598,20 @@ JS;
         if (!current_user_can('manage_woocommerce')) return;
         
         $order_id = $this->get_order_id($order);
-        $already_sent = $this->get_order_meta($order, '_valheim_rcon_sent');
+        $already_sent = $this->get_order_meta($order, '_server_game_rcon_sent');
         
         echo '<div style="margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 4px solid #2196F3;">';
-        echo '<h4>Valheim RCON</h4>';
-        echo '<button class="button valheim-send-rcon" data-order-id="'.esc_attr($order_id).'">Renvoyer commandes RCON</button>';
+        echo '<h4>Server Game RCON</h4>';
+        echo '<button class="button server-game-send-rcon" data-order-id="'.esc_attr($order_id).'">Renvoyer commandes RCON</button>';
         
         if ($already_sent === 'yes') {
-            $sent_at = $this->get_order_meta($order, '_valheim_rcon_sent_at');
+            $sent_at = $this->get_order_meta($order, '_server_game_rcon_sent_at');
             echo ' <span style="color:green;font-weight:bold;">✅ Déjà envoyé';
             if ($sent_at) {
                 echo ' le ' . esc_html(date('d/m/Y à H:i', strtotime($sent_at)));
             }
             echo '</span>';
-            echo '<br><button class="button button-secondary valheim-reset-rcon" data-order-id="'.esc_attr($order_id).'" style="margin-top:5px;">Réinitialiser statut envoi</button>';
+            echo '<br><button class="button button-secondary server-game-reset-rcon" data-order-id="'.esc_attr($order_id).'" style="margin-top:5px;">Réinitialiser statut envoi</button>';
         } else {
             echo ' <span style="color:orange;">⚠️ Pas encore envoyé automatiquement</span>';
         }
@@ -647,7 +647,7 @@ JS;
         $status = str_replace('wc-', '', (string) $new_status);
         
         // Atomic lock using wp_cache_add to prevent race conditions
-        $lock_key = 'valheim_rcon_lock_' . $order_id;
+        $lock_key = 'server_game_rcon_lock_' . $order_id;
         if (!wp_cache_add($lock_key, time(), '', 60)) {
             $this->debug_log("RCON already processing for order {$order_id}, skipping duplicate", null, 'INFO');
             return;
@@ -659,7 +659,7 @@ JS;
                     $order = wc_get_order($order_id);
                 }
                 if ($order) {
-                    $already_sent = $this->get_order_meta($order, '_valheim_rcon_sent');
+                    $already_sent = $this->get_order_meta($order, '_server_game_rcon_sent');
                     if ($already_sent === 'yes') {
                         $this->debug_log("RCON already sent for order {$order_id}, skipping", null, 'INFO');
                         return;
@@ -669,8 +669,8 @@ JS;
                     $success = $this->send_rcon_commands_grouped($order);
                     
                     if ($success) {
-                        $this->set_order_meta($order, '_valheim_rcon_sent', 'yes');
-                        $this->set_order_meta($order, '_valheim_rcon_sent_at', current_time('mysql'));
+                        $this->set_order_meta($order, '_server_game_rcon_sent', 'yes');
+                        $this->set_order_meta($order, '_server_game_rcon_sent_at', current_time('mysql'));
                         $this->debug_log("RCON successfully sent and marked for order {$order_id}", null, 'INFO');
                     }
                 } else {
@@ -720,7 +720,7 @@ JS;
     /* ---------------- AJAX handlers with improved security ---------------- */
 
     public function ajax_test_rcon_connection() {
-        check_ajax_referer('valheim_test_rcon_nonce', 'nonce');
+        check_ajax_referer('server_game_test_rcon_nonce', 'nonce');
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => 'Permissions insuffisantes']);
         }
@@ -743,7 +743,7 @@ JS;
     }
 
     public function ajax_send_rcon_manual() {
-        check_ajax_referer('valheim_send_rcon_manual', 'nonce');
+        check_ajax_referer('server_game_send_rcon_manual', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Permissions insuffisantes']);
         }
@@ -755,13 +755,13 @@ JS;
         if (!$order) wp_send_json_error(['message' => 'Commande introuvable']);
         
         // Reset status temporarily to force resend
-        $this->delete_order_meta($order, '_valheim_rcon_sent');
+        $this->delete_order_meta($order, '_server_game_rcon_sent');
         
         $ok = $this->send_rcon_commands_grouped($order, true);
         if ($ok) {
-            $this->set_order_meta($order, '_valheim_rcon_sent', 'yes');
-            $this->set_order_meta($order, '_valheim_rcon_sent_at', current_time('mysql'));
-            $this->set_order_meta($order, '_valheim_rcon_sent_method', 'manual');
+            $this->set_order_meta($order, '_server_game_rcon_sent', 'yes');
+            $this->set_order_meta($order, '_server_game_rcon_sent_at', current_time('mysql'));
+            $this->set_order_meta($order, '_server_game_rcon_sent_method', 'manual');
             wp_send_json_success(['message' => 'Commandes RCON envoyées manuellement']);
         } else {
             wp_send_json_error(['message' => 'Échec envoi, voir logs']);
@@ -769,7 +769,7 @@ JS;
     }
 
     public function ajax_reset_rcon_status() {
-        check_ajax_referer('valheim_reset_rcon_status', 'nonce');
+        check_ajax_referer('server_game_reset_rcon_status', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Permissions insuffisantes']);
         }
@@ -780,16 +780,16 @@ JS;
         $order = wc_get_order($order_id);
         if (!$order) wp_send_json_error(['message' => 'Commande introuvable']);
         
-        $this->delete_order_meta($order, '_valheim_rcon_sent');
-        $this->delete_order_meta($order, '_valheim_rcon_sent_at');
-        $this->delete_order_meta($order, '_valheim_rcon_sent_method');
+        $this->delete_order_meta($order, '_server_game_rcon_sent');
+        $this->delete_order_meta($order, '_server_game_rcon_sent_at');
+        $this->delete_order_meta($order, '_server_game_rcon_sent_method');
         
         $this->debug_log("RCON status reset for order {$order_id} by admin", null, 'INFO');
         wp_send_json_success(['message' => 'Statut d\'envoi RCON réinitialisé']);
     }
 
     public function ajax_clear_logs() {
-        check_ajax_referer('valheim_test_rcon_nonce', 'nonce');
+        check_ajax_referer('server_game_test_rcon_nonce', 'nonce');
         if (!current_user_can('manage_options')) {
             wp_send_json_error(['message' => 'Permissions insuffisantes']);
         }
@@ -863,8 +863,8 @@ JS;
         
         foreach ($order->get_items() as $item) {
             $product_id = $item->get_product_id();
-            $commands = (array) get_post_meta($product_id, '_valheim_rcon_commands', true);
-            $server_sel = get_post_meta($product_id, '_valheim_rcon_server', true);
+            $commands = (array) get_post_meta($product_id, '_server_game_rcon_commands', true);
+            $server_sel = get_post_meta($product_id, '_server_game_rcon_server', true);
             
             if (!empty($commands)) {
                 foreach ($commands as $raw_cmd) {
@@ -1081,7 +1081,7 @@ JS;
             '{billing_email}' => sanitize_email($order->get_billing_email()),
             '{billing_first_name}' => sanitize_text_field($order->get_billing_first_name()),
             '{billing_last_name}' => sanitize_text_field($order->get_billing_last_name()),
-            '{valheim_username}' => $this->sanitize_valheim_username($this->get_order_meta($order, '_valheim_username')),
+            '{game_username}' => $this->sanitize_game_username($this->get_order_meta($order, '_game_username')),
         ];
         
         $command = strtr($command, $repl);
@@ -1092,7 +1092,7 @@ JS;
         return trim($command);
     }
 
-    private function sanitize_valheim_username($username) {
+    private function sanitize_game_username($username) {
         $username = sanitize_text_field($username);
         // Allow only alphanumeric, underscore, dash, and dot
         return preg_replace('/[^a-zA-Z0-9_.-]/', '', $username);
@@ -1227,7 +1227,7 @@ JS;
     /* ---------------- Admin columns with HPOS compatibility ---------------- */
 
     public function add_order_columns($columns) {
-        $columns['rcon_status'] = __('RCON', 'wc-valheim-rcon');
+        $columns['rcon_status'] = __('RCON', 'wc-server-game-rcon');
         return $columns;
     }
 
@@ -1271,11 +1271,11 @@ JS;
             return;
         }
         
-        woocommerce_form_field('valheim_username', [
+        woocommerce_form_field('game_username', [
             'type' => 'text',
             'class' => ['form-row-wide'],
-            'label' => __('Nom d\'utilisateur Valheim *'),
-            'placeholder' => __('Votre nom d\'utilisateur exact dans Valheim'),
+            'label' => __('Nom d\'utilisateur de jeu *'),
+            'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu'),
             'required' => true,
             'description' => __('Ce nom doit correspondre exactement à votre pseudo dans le jeu. Les récompenses ne pourront pas être envoyées si le nom est incorrect.'),
             'custom_attributes' => [
@@ -1283,29 +1283,29 @@ JS;
                 'pattern' => '[a-zA-Z0-9_.-]+',
                 'title' => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
             ]
-        ], $checkout->get_value('valheim_username'));
+        ], $checkout->get_value('game_username'));
     }
 
-    public function validate_valheim_username() {
+    public function validate_game_username() {
         // Only validate if field is enabled
         if (!$this->is_username_field_enabled()) {
             return;
         }
         
-        if (empty($_POST['valheim_username'])) {
-            wc_add_notice(__('Le nom d\'utilisateur Valheim est requis.'), 'error');
+        if (empty($_POST['game_username'])) {
+            wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
             return;
         }
         
-        $username = sanitize_text_field($_POST['valheim_username']);
+        $username = sanitize_text_field($_POST['game_username']);
         
         if (strlen($username) > 50 || strlen($username) < 2) {
-            wc_add_notice(__('Le nom d\'utilisateur Valheim doit contenir entre 2 et 50 caractères.'), 'error');
+            wc_add_notice(__('Le nom d\'utilisateur de jeu doit contenir entre 2 et 50 caractères.'), 'error');
             return;
         }
         
         if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
-            wc_add_notice(__('Le nom d\'utilisateur Valheim ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
+            wc_add_notice(__('Le nom d\'utilisateur de jeu ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
             return;
         }
         
@@ -1317,7 +1317,7 @@ JS;
             }
             if (!$exists['player_found']) {
                 wc_add_notice(sprintf(
-                    __('Le joueur "%s" n\'a pas été trouvé sur le serveur Valheim. Vérifiez l\'orthographe exacte ou connectez-vous au serveur avant de passer commande.'), 
+                    __('Le joueur "%s" n\'a pas été trouvé sur le serveur de jeu. Vérifiez l\'orthographe exacte ou connectez-vous au serveur avant de passer commande.'), 
                     esc_html($username)
                 ), 'error');
                 return;
@@ -1327,10 +1327,10 @@ JS;
 
     public function save_custom_checkout_fields_new($order, $data) {
         // Only save if field is enabled and submitted
-        if ($this->is_username_field_enabled() && !empty($_POST['valheim_username'])) {
-            $username = $this->sanitize_valheim_username($_POST['valheim_username']);
-            $this->set_order_meta($order, '_valheim_username', $username);
-            $this->set_order_meta($order, '_valheim_username_verified_at', current_time('mysql'));
+        if ($this->is_username_field_enabled() && !empty($_POST['game_username'])) {
+            $username = $this->sanitize_game_username($_POST['game_username']);
+            $this->set_order_meta($order, '_game_username', $username);
+            $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
         }
     }
 
@@ -1397,9 +1397,9 @@ JS;
 } // Close class existence check
 
 /**
- * Classe pour la mise à jour GitHub adaptée pour Valheim RCON
+ * Classe pour la mise à jour GitHub adaptée pour Server Game RCON
  */
-class ValheimRCONGitHubUpdater {
+class ServerGameRCONGitHubUpdater {
     private $file;
     private $plugin;
     private $basename;
@@ -1542,7 +1542,7 @@ class ValheimRCONGitHubUpdater {
         }
         
         // Cache la réponse GitHub pour éviter les requêtes multiples
-        $cache_key = 'valheim_rcon_github_' . md5($this->github_user . $this->github_repo);
+        $cache_key = 'server_game_rcon_github_' . md5($this->github_user . $this->github_repo);
         $cached_response = get_transient($cache_key);
         
         if ($cached_response !== false) {
@@ -1603,23 +1603,23 @@ class ValheimRCONGitHubUpdater {
 // Initialisation du plugin
 add_action('plugins_loaded', function() {
     if (class_exists('WooCommerce')) {
-        new WC_Valheim_RCON_Fixed();
+        new WC_Server_Game_RCON();
     } else {
         add_action('admin_notices', function() {
-            echo '<div class="notice notice-error"><p>Le plugin Valheim RCON nécessite WooCommerce pour fonctionner.</p></div>';
+            echo '<div class="notice notice-error"><p>Le plugin Server Game RCON nécessite WooCommerce pour fonctionner.</p></div>';
         });
     }
 });
 
 // Hook de désactivation pour nettoyer les caches
 register_deactivation_hook(__FILE__, function() {
-    wp_clear_scheduled_hook('valheim_rcon_cleanup_logs');
-    wp_clear_scheduled_hook('valheim_rcon_retry_failed');
+    wp_clear_scheduled_hook('server_game_rcon_cleanup_logs');
+    wp_clear_scheduled_hook('server_game_rcon_retry_failed');
     
     // Nettoyer les caches GitHub
     global $wpdb;
-    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_valheim_rcon_github_%'");
-    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_timeout_valheim_rcon_github_%'");
+    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_server_game_rcon_github_%'");
+    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_timeout_server_game_rcon_github_%'");
 });
 
 ?>
