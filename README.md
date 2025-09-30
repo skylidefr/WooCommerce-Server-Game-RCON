@@ -1,4 +1,4 @@
-# WooCommerce Server Game RCON
+# WooCommerce Server Game RCON - WCSCR
 
 <div align="center">
 
