@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WooCommerce Server Game RCON
- * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Version corrigée avec GitHub Updater
- * Version: 1.0.0
+ * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Optimisé pour Valheim
+ * Version: 1.0.1
  * Author: Skylide
  * Requires PHP: 7.4
  * GitHub Plugin URI: skylidefr/WooCommerce-Server-Game-RCON
@@ -147,6 +147,7 @@ class WC_Server_Game_RCON {
         add_settings_field('servers', 'Serveurs RCON', [$this, 'field_servers_render'], 'serverGameRcon', 'server_game_rcon_section');
         add_settings_field('timeout', 'Timeout (s)', [$this, 'field_timeout_render'], 'serverGameRcon', 'server_game_rcon_section');
         add_settings_field('enable_username_field', 'Champ pseudo', [$this, 'field_enable_username_render'], 'serverGameRcon', 'server_game_rcon_section');
+        add_settings_field('enable_steamid_field', 'Champ SteamID', [$this, 'field_enable_steamid_render'], 'serverGameRcon', 'server_game_rcon_section');
         add_settings_field('verify_player_exists', 'Vérification joueur', [$this, 'field_verify_player_render'], 'serverGameRcon', 'server_game_rcon_section');
         add_settings_field('auto_retry', 'Retry failed', [$this, 'field_auto_retry_render'], 'serverGameRcon', 'server_game_rcon_section');
         add_settings_field('debug', 'Debug', [$this, 'field_debug_render'], 'serverGameRcon', 'server_game_rcon_section');
@@ -155,9 +156,10 @@ class WC_Server_Game_RCON {
     public function sanitize_settings($input) {
         $out = [];
         
-        // Sanitize basic options
-        $out['timeout'] = max(1, min(30, intval($input['timeout'] ?? 3)));
+        // Sanitize basic options - Timeout augmenté pour Valheim
+        $out['timeout'] = max(5, min(30, intval($input['timeout'] ?? 10)));
         $out['enable_username_field'] = !empty($input['enable_username_field']) ? 1 : 0;
+        $out['enable_steamid_field'] = !empty($input['enable_steamid_field']) ? 1 : 0;
         $out['auto_retry'] = !empty($input['auto_retry']) ? 1 : 0;
         $out['verify_player_exists'] = !empty($input['verify_player_exists']) ? 1 : 0;
         $out['debug'] = !empty($input['debug']) ? 1 : 0;
@@ -183,7 +185,7 @@ class WC_Server_Game_RCON {
             $host = sanitize_text_field($s['host'] ?? '');
             $port = max(1, min(65535, intval($s['port'] ?? 0)));
             $password = sanitize_text_field($s['password'] ?? '');
-            $timeout = max(1, min(30, intval($s['timeout'] ?? $out['timeout'])));
+            $timeout = max(5, min(30, intval($s['timeout'] ?? $out['timeout'])));
             
             // Validate host format
             if (!empty($host) && !filter_var($host, FILTER_VALIDATE_IP) && !filter_var('http://' . $host, FILTER_VALIDATE_URL)) {
@@ -219,7 +221,8 @@ class WC_Server_Game_RCON {
 
     public function field_timeout_render() {
         $opts = get_option($this->option_name, []);
-        printf('<input type="number" name="%s[timeout]" value="%d" min="1" max="30" step="1"> secondes', esc_attr($this->option_name), intval($opts['timeout'] ?? 3));
+        printf('<input type="number" name="%s[timeout]" value="%d" min="5" max="30" step="1"> secondes', esc_attr($this->option_name), intval($opts['timeout'] ?? 10));
+        echo '<p class="description">Recommandé: 10-15 secondes pour Valheim (les serveurs sont lents à répondre)</p>';
     }
 
     public function field_enable_username_render() {
@@ -227,7 +230,15 @@ class WC_Server_Game_RCON {
         printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo de jeu au checkout', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_username_field']), true, false));
-        echo '<p class="description">Si activé, les clients devront saisir leur pseudo de jeu lors de la commande.</p>';
+        echo '<p class="description">Si activé, les clients devront saisir leur pseudo de jeu lors de la commande. Utilisez {game_username} dans vos commandes.</p>';
+    }
+
+    public function field_enable_steamid_render() {
+        $opts = get_option($this->option_name, []);
+        printf('<input type="checkbox" name="%s[enable_steamid_field]" value="1" %s> Afficher le champ SteamID64 au checkout', 
+               esc_attr($this->option_name), 
+               checked(!empty($opts['enable_steamid_field']), true, false));
+        echo '<p class="description">Recommandé pour Valheim. Nécessaire pour les commandes admin (ban, kick, permit). Utilisez {steam_id} dans vos commandes.</p>';
     }
 
     public function field_servers_render() {
@@ -256,7 +267,7 @@ class WC_Server_Game_RCON {
                     <button type="button" class="button" id="server-game-add-rcon-server">+ Ajouter un serveur</button>
                 </p>
                 <input type="hidden" name="<?php echo esc_attr($this->option_name); ?>[servers]" id="server_game_rcon_servers" value="<?php echo esc_attr($json); ?>" />
-                <p class="description">Ajoutez, supprimez ou éditez les serveurs. Les modifications seront sauvegardées à l'enregistrement de la page.</p>
+                <p class="description">Port RCON Valheim par défaut: <strong>2457</strong>. Ajoutez, supprimez ou éditez les serveurs.</p>
             </td>
         </tr>
         </table>
@@ -274,9 +285,9 @@ class WC_Server_Game_RCON {
                 return `<tr data-idx="${idx}">
                     <td><input type="text" class="regular-text srv-name" value="${escapedName}" maxlength="50" /></td>
                     <td><input type="text" class="regular-text srv-host" value="${escapedHost}" maxlength="253" /></td>
-                    <td><input type="number" class="small-text srv-port" value="${srv.port||28016}" min="1" max="65535" /></td>
+                    <td><input type="number" class="small-text srv-port" value="${srv.port||2457}" min="1" max="65535" /></td>
                     <td><input type="password" class="regular-text srv-password" value="${escapedPassword}" maxlength="100" /></td>
-                    <td><input type="number" class="small-text srv-timeout" value="${srv.timeout||3}" min="1" max="30" /></td>
+                    <td><input type="number" class="small-text srv-timeout" value="${srv.timeout||10}" min="5" max="30" /></td>
                     <td><button type="button" class="button link-delete srv-remove">Supprimer</button></td>
                 </tr>`;
             }
@@ -313,9 +324,9 @@ class WC_Server_Game_RCON {
                     const row = $(this);
                     const name = row.find('.srv-name').val().trim();
                     const host = row.find('.srv-host').val().trim();
-                    const port = parseInt(row.find('.srv-port').val()) || 28016;
+                    const port = parseInt(row.find('.srv-port').val()) || 2457;
                     const password = row.find('.srv-password').val();
-                    const timeout = parseInt(row.find('.srv-timeout').val()) || 3;
+                    const timeout = parseInt(row.find('.srv-timeout').val()) || 10;
                     
                     if (host && password) {
                         servers.push({
@@ -323,7 +334,7 @@ class WC_Server_Game_RCON {
                             host: host,
                             port: Math.max(1, Math.min(65535, port)),
                             password: password,
-                            timeout: Math.max(1, Math.min(30, timeout))
+                            timeout: Math.max(5, Math.min(30, timeout))
                         });
                     }
                 });
@@ -334,7 +345,7 @@ class WC_Server_Game_RCON {
                 e.preventDefault();
                 let servers = [];
                 try { servers = JSON.parse(input.val()); } catch(e) { servers = []; }
-                servers.push({name:'',host:'',port:28016,password:'',timeout:3});
+                servers.push({name:'',host:'',port:2457,password:'',timeout:10});
                 input.val(JSON.stringify(servers));
                 render();
             });
@@ -350,7 +361,7 @@ class WC_Server_Game_RCON {
         printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur avant validation de commande', 
                esc_attr($this->option_name), 
                checked(!empty($opts['verify_player_exists']), true, false));
-        echo '<p class="description">Si activé, le plugin vérifiera que le pseudo de jeu saisi existe bien sur le serveur avant de valider la commande.</p>';
+        echo '<p class="description"><strong>Non recommandé pour Valheim</strong> : Le serveur ne fournit pas de liste de joueurs via RCON.</p>';
     }
 
     public function field_auto_retry_render() {
@@ -379,7 +390,7 @@ class WC_Server_Game_RCON {
         }
         ?>
         <div class="wrap">
-            <h1>Server Game RCON</h1>
+            <h1>Server Game RCON - Valheim Edition</h1>
             
             <!-- Section de mise à jour -->
             <div class="notice notice-info">
@@ -389,6 +400,18 @@ class WC_Server_Game_RCON {
                     <a href="<?php echo admin_url('plugins.php'); ?>" class="button button-secondary" style="margin-left: 10px;">Mettre à jour</a>
                 <?php endif; ?>
                 </p>
+            </div>
+
+            <!-- Info Valheim -->
+            <div class="notice notice-warning">
+                <p><strong>Configuration Valheim :</strong></p>
+                <ul style="margin-left: 20px;">
+                    <li>Port RCON par défaut : <strong>2457</strong></li>
+                    <li>Timeout recommandé : <strong>10-15 secondes</strong> (les serveurs Valheim sont lents)</li>
+                    <li>Commandes fiables : <code>broadcast</code>, <code>say</code>, <code>save</code></li>
+                    <li>Variables disponibles : {game_username}, {steam_id}, {billing_first_name}, {order_id}</li>
+                    <li>La vérification de joueur n'est pas supportée par Valheim RCON</li>
+                </ul>
             </div>
             
             <form method="post" action="options.php">
@@ -401,9 +424,14 @@ class WC_Server_Game_RCON {
 
             <p><button id="server-game-test-rcon" class="button button-secondary">Tester la connexion</button></p>
 
-            <h2>Logs</h2>
-            <?php if (file_exists($this->log_file)): ?>
-                <textarea readonly style="width:100%;height:300px;font-family:monospace;"><?php echo esc_textarea(file_get_contents($this->log_file)); ?></textarea>
+            <h2>Logs (100 dernières lignes)</h2>
+            <?php if (file_exists($this->log_file)): 
+                $content = file_get_contents($this->log_file);
+                $lines = explode("\n", $content);
+                $last_lines = array_slice($lines, -100);
+                $limited_content = implode("\n", $last_lines);
+            ?>
+                <textarea readonly style="width:100%;height:300px;font-family:monospace;"><?php echo esc_textarea($limited_content); ?></textarea>
                 <p><button id="server-game-clear-logs" class="button button-secondary">Vider les logs</button></p>
             <?php else: ?>
                 <p>Aucun log</p>
@@ -442,7 +470,7 @@ class WC_Server_Game_RCON {
                 }
                 
                 var server = servers[0];
-                var timeout = $("input[name='{$this->option_name}[timeout]']").val() || server.timeout || 3;
+                var timeout = $("input[name='{$this->option_name}[timeout]']").val() || server.timeout || 10;
                 
                 button.prop('disabled', true).text('Test en cours...');
                 $.post(ajaxurl, {
@@ -492,7 +520,7 @@ class WC_Server_Game_RCON {
             
             $(document).off('click.server_game', '.server-game-reset-rcon').on('click.server_game', '.server-game-reset-rcon', function(e){
                 e.preventDefault();
-                if (!confirm('Réinitialiser le statut d\\'envoi RCON pour cette commande ?\\n\\nCeci permettra au système de renvoyer automatiquement les commandes.')) return;
+                if (!confirm('Réinitialiser le statut d\'envoi RCON pour cette commande ?\\n\\nCeci permettra au système de renvoyer automatiquement les commandes.')) return;
                 var orderId = $(this).data('order-id');
                 var btn = $(this);
                 var orig = btn.text();
@@ -569,7 +597,11 @@ JS;
 
         <p><label>Commandes RCON (une par ligne)</label></p>
         <p><textarea name="server_game_rcon_commands" style="width:100%;height:120px;" maxlength="<?php echo $this->max_command_length * 10; ?>"><?php echo esc_textarea($value); ?></textarea></p>
-        <p class="description">Variables: {game_username}, {billing_first_name}, {billing_last_name}, {billing_email}, {order_id}</p>
+        <p class="description"><strong>Valheim - Variables disponibles:</strong><br>
+        {game_username}, {steam_id}, {billing_first_name}, {billing_last_name}, {billing_email}, {order_id}</p>
+        <p class="description"><strong>Exemples Valheim:</strong><br>
+        <code>broadcast Bienvenue {billing_first_name} !</code><br>
+        <code>say Merci pour votre achat #{order_id}</code></p>
         <?php
     }
 
@@ -646,12 +678,15 @@ JS;
     public function maybe_send_rcon($order_id, $old_status, $new_status, $order) {
         $status = str_replace('wc-', '', (string) $new_status);
         
-        // Atomic lock using wp_cache_add to prevent race conditions
+        // Improved lock using transients (more reliable than wp_cache)
         $lock_key = 'server_game_rcon_lock_' . $order_id;
-        if (!wp_cache_add($lock_key, time(), '', 60)) {
+        if (get_transient($lock_key)) {
             $this->debug_log("RCON already processing for order {$order_id}, skipping duplicate", null, 'INFO');
             return;
         }
+        
+        // Set lock for 2 minutes
+        set_transient($lock_key, time(), 120);
         
         try {
             if ($status === 'completed') {
@@ -678,7 +713,7 @@ JS;
                 }
             }
         } finally {
-            wp_cache_delete($lock_key);
+            delete_transient($lock_key);
         }
     }
 
@@ -728,13 +763,13 @@ JS;
         $host = sanitize_text_field($_POST['host'] ?? '');
         $port = max(1, min(65535, intval($_POST['port'] ?? 2457)));
         $password = sanitize_text_field($_POST['password'] ?? '');
-        $timeout = max(1, min(30, intval($_POST['timeout'] ?? 3)));
+        $timeout = max(5, min(30, intval($_POST['timeout'] ?? 10)));
         
         if (empty($host) || empty($password)) {
             wp_send_json_error(['message' => 'Host et mot de passe requis']);
         }
         
-        $res = $this->execute_rcon_command($host, $port, $password, 'echo test', $timeout);
+        $res = $this->execute_rcon_command($host, $port, $password, 'info', $timeout);
         if (!empty($res['success'])) {
             wp_send_json_success(['message' => 'Connexion RCON OK', 'response' => substr($res['body'] ?? '', 0, 100)]);
         } else {
@@ -851,7 +886,7 @@ JS;
                 'host' => $opts['host'],
                 'port' => intval($opts['port'] ?? 2457),
                 'password' => $opts['password'],
-                'timeout' => intval($opts['timeout'] ?? 3),
+                'timeout' => intval($opts['timeout'] ?? 10),
             ];
         }
         
@@ -967,7 +1002,7 @@ JS;
         $host = $srv['host'] ?? '';
         $port = intval($srv['port'] ?? 2457);
         $password = $srv['password'] ?? '';
-        $timeout = intval($srv['timeout'] ?? 3);
+        $timeout = intval($srv['timeout'] ?? 10);
         
         $result = ['sent' => 0, 'errors' => []];
         
@@ -1082,11 +1117,12 @@ JS;
             '{billing_first_name}' => sanitize_text_field($order->get_billing_first_name()),
             '{billing_last_name}' => sanitize_text_field($order->get_billing_last_name()),
             '{game_username}' => $this->sanitize_game_username($this->get_order_meta($order, '_game_username')),
+            '{steam_id}' => $this->sanitize_steam_id($this->get_order_meta($order, '_steam_id')),
         ];
         
         $command = strtr($command, $repl);
         
-        // Additional security: remove potentially dangerous characters
+        // Additional security: remove potentially dangerous characters (but keep quotes for Valheim)
         $command = preg_replace('/[;&|`$(){}[\]<>]/', '', $command);
         
         return trim($command);
@@ -1096,6 +1132,12 @@ JS;
         $username = sanitize_text_field($username);
         // Allow only alphanumeric, underscore, dash, and dot
         return preg_replace('/[^a-zA-Z0-9_.-]/', '', $username);
+    }
+
+    private function sanitize_steam_id($steam_id) {
+        $steam_id = sanitize_text_field($steam_id);
+        // SteamID64 is 17 digits
+        return preg_replace('/[^0-9]/', '', $steam_id);
     }
 
     /* ---------------- Order history with size limit ---------------- */
@@ -1133,7 +1175,7 @@ JS;
 
     /* ---------------- Improved RCON protocol handlers ---------------- */
 
-    private function read_rcon_response_safe($fp, $timeout = 3) {
+    private function read_rcon_response_safe($fp, $timeout = 10) {
         $start_time = time();
         $header = '';
         
@@ -1200,7 +1242,7 @@ JS;
         return pack('V', $size) . $payload;
     }
 
-    public function execute_rcon_command($host, $port, $password, $command, $timeout = 3) {
+    public function execute_rcon_command($host, $port, $password, $command, $timeout = 10) {
         $this->debug_log("execute_rcon_command '{$command}' to {$host}:{$port}");
         
         $connection_result = $this->establish_rcon_connection($host, $port, $timeout);
@@ -1265,51 +1307,96 @@ JS;
         return !empty($opts['enable_username_field']);
     }
 
+    private function is_steamid_field_enabled() {
+        $opts = get_option($this->option_name, []);
+        return !empty($opts['enable_steamid_field']);
+    }
+
     public function add_billing_custom_fields($checkout) {
-        // Only show the field if enabled in admin settings
-        if (!$this->is_username_field_enabled()) {
-            return;
+        echo '<div id="server_game_rcon_fields">';
+        
+        // Game username field
+        if ($this->is_username_field_enabled()) {
+            woocommerce_form_field('game_username', [
+                'type' => 'text',
+                'class' => ['form-row-wide'],
+                'label' => __('Nom d\'utilisateur de jeu *'),
+                'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu'),
+                'required' => true,
+                'description' => __('Ce nom doit correspondre exactement à votre pseudo dans le jeu.'),
+                'custom_attributes' => [
+                    'maxlength' => '50',
+                    'pattern' => '[a-zA-Z0-9_.-]+',
+                    'title' => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
+                ]
+            ], $checkout->get_value('game_username'));
         }
         
-        woocommerce_form_field('game_username', [
-            'type' => 'text',
-            'class' => ['form-row-wide'],
-            'label' => __('Nom d\'utilisateur de jeu *'),
-            'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu'),
-            'required' => true,
-            'description' => __('Ce nom doit correspondre exactement à votre pseudo dans le jeu. Les récompenses ne pourront pas être envoyées si le nom est incorrect.'),
-            'custom_attributes' => [
-                'maxlength' => '50',
-                'pattern' => '[a-zA-Z0-9_.-]+',
-                'title' => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
-            ]
-        ], $checkout->get_value('game_username'));
+        // SteamID field for Valheim
+        if ($this->is_steamid_field_enabled()) {
+            woocommerce_form_field('steam_id', [
+                'type' => 'text',
+                'class' => ['form-row-wide'],
+                'label' => __('SteamID64 *'),
+                'placeholder' => __('Votre SteamID64 (17 chiffres)'),
+                'required' => true,
+                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank">steamid.io</a>. Nécessaire pour les commandes admin Valheim.'),
+                'custom_attributes' => [
+                    'maxlength' => '17',
+                    'pattern' => '[0-9]{17}',
+                    'title' => 'Votre SteamID64 doit contenir exactement 17 chiffres'
+                ]
+            ], $checkout->get_value('steam_id'));
+        }
+        
+        echo '</div>';
     }
 
     public function validate_game_username() {
-        // Only validate if field is enabled
-        if (!$this->is_username_field_enabled()) {
-            return;
+        // Validate game username if enabled
+        if ($this->is_username_field_enabled()) {
+            if (empty($_POST['game_username'])) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
+                return;
+            }
+            
+            $username = sanitize_text_field($_POST['game_username']);
+            
+            if (strlen($username) > 50 || strlen($username) < 2) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu doit contenir entre 2 et 50 caractères.'), 'error');
+                return;
+            }
+            
+            if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
+                return;
+            }
         }
         
-        if (empty($_POST['game_username'])) {
-            wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
-            return;
+        // Validate SteamID if enabled
+        if ($this->is_steamid_field_enabled()) {
+            if (empty($_POST['steam_id'])) {
+                wc_add_notice(__('Le SteamID64 est requis.'), 'error');
+                return;
+            }
+            
+            $steam_id = sanitize_text_field($_POST['steam_id']);
+            
+            if (!preg_match('/^[0-9]{17}$/', $steam_id)) {
+                wc_add_notice(__('Le SteamID64 doit contenir exactement 17 chiffres.'), 'error');
+                return;
+            }
+            
+            // Basic SteamID64 validation (should start with 7656119)
+            if (!str_starts_with($steam_id, '7656119')) {
+                wc_add_notice(__('Le SteamID64 semble invalide. Il doit commencer par 7656119.'), 'error');
+                return;
+            }
         }
         
-        $username = sanitize_text_field($_POST['game_username']);
-        
-        if (strlen($username) > 50 || strlen($username) < 2) {
-            wc_add_notice(__('Le nom d\'utilisateur de jeu doit contenir entre 2 et 50 caractères.'), 'error');
-            return;
-        }
-        
-        if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
-            wc_add_notice(__('Le nom d\'utilisateur de jeu ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
-            return;
-        }
-        
-        if ($this->should_verify_player_exists()) {
+        // Player verification (not recommended for Valheim)
+        if ($this->is_username_field_enabled() && $this->should_verify_player_exists()) {
+            $username = sanitize_text_field($_POST['game_username']);
             $exists = $this->verify_player_exists_on_server($username);
             if (!$exists['success']) {
                 wc_add_notice(__('Erreur de vérification: ') . $exists['message'], 'error');
@@ -1317,24 +1404,30 @@ JS;
             }
             if (!$exists['player_found']) {
                 wc_add_notice(sprintf(
-                    __('Le joueur "%s" n\'a pas été trouvé sur le serveur de jeu. Vérifiez l\'orthographe exacte ou connectez-vous au serveur avant de passer commande.'), 
+                    __('Le joueur "%s" n\'a pas été trouvé sur le serveur. Note: La vérification n\'est pas fiable sur Valheim.'), 
                     esc_html($username)
-                ), 'error');
-                return;
+                ), 'notice');
             }
         }
     }
 
     public function save_custom_checkout_fields_new($order, $data) {
-        // Only save if field is enabled and submitted
+        // Save game username if enabled and submitted
         if ($this->is_username_field_enabled() && !empty($_POST['game_username'])) {
             $username = $this->sanitize_game_username($_POST['game_username']);
             $this->set_order_meta($order, '_game_username', $username);
             $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
         }
+        
+        // Save SteamID if enabled and submitted
+        if ($this->is_steamid_field_enabled() && !empty($_POST['steam_id'])) {
+            $steam_id = $this->sanitize_steam_id($_POST['steam_id']);
+            $this->set_order_meta($order, '_steam_id', $steam_id);
+            $this->set_order_meta($order, '_steam_id_verified_at', current_time('mysql'));
+        }
     }
 
-    /* ---------------- Player verification on server ---------------- */
+    /* ---------------- Player verification on server (not recommended for Valheim) ---------------- */
 
     private function should_verify_player_exists() {
         $opts = get_option($this->option_name, []);
@@ -1349,37 +1442,23 @@ JS;
             return ['success' => false, 'message' => 'Aucun serveur configuré'];
         }
         
+        // Note: Valheim RCON doesn't support player listing
+        // This function will attempt connection but won't verify player existence reliably
         foreach ($servers as $server) {
             $host = $server['host'] ?? '';
             $port = intval($server['port'] ?? 2457);
             $password = $server['password'] ?? '';
-            $timeout = intval($server['timeout'] ?? 3);
+            $timeout = intval($server['timeout'] ?? 10);
             
             if (empty($host) || empty($password)) continue;
             
-            // Try multiple commands to verify player
-            $commands = ['players', 'save', 'status'];
+            // Try 'info' command (Valheim compatible)
+            $result = $this->execute_rcon_command($host, $port, $password, 'info', $timeout);
             
-            foreach ($commands as $cmd) {
-                $result = $this->execute_rcon_command($host, $port, $password, $cmd, $timeout);
-                
-                if ($result['success']) {
-                    $response = strtolower($result['body'] ?? '');
-                    
-                    // Check if username appears in response
-                    if (stripos($response, strtolower($username)) !== false) {
-                        return ['success' => true, 'player_found' => true, 'server' => $server['name'] ?? $host];
-                    }
-                    
-                    // If we got a valid response but no player found, that's still success
-                    if (strpos($response, 'player') !== false || strpos($response, 'connected') !== false) {
-                        return ['success' => true, 'player_found' => false];
-                    }
-                    
-                    // If we can connect successfully, assume player verification is OK
-                    // (player might be offline but have played before)
-                    return ['success' => true, 'player_found' => true, 'note' => 'Basic verification OK'];
-                }
+            if ($result['success']) {
+                // Valheim doesn't provide player lists via RCON
+                // If we can connect, assume player verification is OK
+                return ['success' => true, 'player_found' => true, 'note' => 'Valheim ne supporte pas la vérification de joueur via RCON'];
             }
         }
         
