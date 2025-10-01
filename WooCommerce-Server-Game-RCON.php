@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce Server Game RCON
  * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Optimisé pour Valheim
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: Skylide
  * Requires PHP: 7.4
  * GitHub Plugin URI: skylidefr/WooCommerce-Server-Game-RCON
@@ -36,48 +36,199 @@ class WC_Server_Game_RCON {
         register_activation_hook(__FILE__, [$this, 'on_activation']);
         register_deactivation_hook(__FILE__, [$this, 'on_deactivation']);
 
-        // Système de mise à jour GitHub
         if (is_admin()) {
             new ServerGameRCONGitHubUpdater($this->plugin_file);
         }
 
-        // Admin & settings
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'settings_init']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_scripts']);
 
-        // Product metabox & save
         add_action('add_meta_boxes', [$this, 'add_product_metabox']);
         add_action('save_post_product', [$this, 'save_product_metabox']);
 
-        // Order UI & hooks
         add_action('woocommerce_admin_order_data_after_billing_address', [$this, 'render_order_manual_send_button'], 10, 1);
         add_action('woocommerce_admin_order_data_after_billing_address', [$this, 'render_order_rcon_history'], 20, 1);
 
-        // Use universal hook compatible with HPOS + legacy
         add_action('woocommerce_order_status_changed', [$this, 'maybe_send_rcon'], 10, 4);
 
-        // Checkout extras (optional)
+        // NOUVEAU : Approche hybride
+        add_action('woocommerce_before_add_to_cart_button', [$this, 'render_product_page_fields']);
+        add_filter('woocommerce_add_to_cart_validation', [$this, 'validate_fields_before_cart'], 10, 3);
+        add_action('woocommerce_add_to_cart', [$this, 'save_fields_to_session']);
+        add_action('woocommerce_checkout_create_order', [$this, 'save_session_fields_to_order'], 5, 2);
+        
+        // ANCIEN : Fallback checkout classique
         add_action('woocommerce_after_checkout_billing_form', [$this, 'add_billing_custom_fields']);
         add_action('woocommerce_checkout_process', [$this, 'validate_game_username']);
         add_action('woocommerce_checkout_create_order', [$this, 'save_custom_checkout_fields_new'], 10, 2);
 
-        // Admin list columns
         add_filter('manage_edit-shop_order_columns', [$this, 'add_order_columns'], 20, 1);
         add_action('manage_shop_order_posts_custom_column', [$this, 'render_order_columns_legacy'], 10, 2);
         add_action('manage_woocommerce_page_wc-orders_custom_column', [$this, 'render_order_columns_hpos'], 10, 2);
 
-        // AJAX & retry
         add_action('wp_ajax_server_game_test_rcon_connection', [$this, 'ajax_test_rcon_connection']);
         add_action('wp_ajax_server_game_send_rcon_manual', [$this, 'ajax_send_rcon_manual']);
         add_action('wp_ajax_server_game_reset_rcon_status', [$this, 'ajax_reset_rcon_status']);
         add_action('wp_ajax_server_game_clear_logs', [$this, 'ajax_clear_logs']);
         add_action($this->hook_retry, [$this, 'retry_failed_commands'], 10, 1);
 
-        // Cleanup scheduled task
         add_action('server_game_rcon_cleanup_logs', [$this, 'cleanup_old_logs']);
+        add_action('woocommerce_checkout_order_processed', [$this, 'cleanup_session_fields']);
+    }
+    // NOUVELLES MÉTHODES - APPROCHE HYBRIDE
+    
+    public function render_product_page_fields() {
+        global $product;
+        
+        if (!$product || !$this->product_has_rcon_commands($product->get_id())) {
+            return;
+        }
+        
+        $session_username = WC()->session ? WC()->session->get('rcon_game_username', '') : '';
+        $session_steamid = WC()->session ? WC()->session->get('rcon_steam_id', '') : '';
+        
+        echo '<div class="server-game-rcon-product-fields" style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #2196F3; border-radius: 4px;">';
+        echo '<h4 style="margin: 0 0 10px 0; color: #2196F3;">🎮 Informations de jeu requises</h4>';
+        echo '<p style="margin: 0 0 15px 0; color: #666; font-size: 0.9em;">Ces informations seront utilisées pour vous attribuer automatiquement vos achats dans le jeu.</p>';
+        
+        if ($this->is_username_field_enabled()) {
+            woocommerce_form_field('rcon_game_username', [
+                'type'        => 'text',
+                'class'       => ['form-row-wide'],
+                'label'       => __('Pseudo In-Game *', 'wc-server-game-rcon'),
+                'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu', 'wc-server-game-rcon'),
+                'required'    => true,
+                'custom_attributes' => [
+                    'maxlength' => '50',
+                    'pattern'   => '[a-zA-Z0-9_.-]+',
+                    'title'     => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
+                ]
+            ], $session_username);
+        }
+        
+        if ($this->is_steamid_field_enabled()) {
+            woocommerce_form_field('rcon_steam_id', [
+                'type'        => 'text',
+                'class'       => ['form-row-wide'],
+                'label'       => __('SteamID64 *', 'wc-server-game-rcon'),
+                'placeholder' => __('Votre SteamID64 (17 chiffres)', 'wc-server-game-rcon'),
+                'required'    => true,
+                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank" rel="noopener">steamid.io</a>', 'wc-server-game-rcon'),
+                'custom_attributes' => [
+                    'maxlength' => '17',
+                    'pattern'   => '[0-9]{17}',
+                    'title'     => 'Votre SteamID64 doit contenir exactement 17 chiffres'
+                ]
+            ], $session_steamid);
+        }
+        
+        echo '</div>';
     }
 
+    private function product_has_rcon_commands($product_id) {
+        $commands = get_post_meta($product_id, '_server_game_rcon_commands', true);
+        return !empty($commands) && is_array($commands) && count($commands) > 0;
+    }
+
+    public function validate_fields_before_cart($passed, $product_id, $quantity) {
+        if (!$this->product_has_rcon_commands($product_id)) {
+            return $passed;
+        }
+        
+        if ($this->is_username_field_enabled()) {
+            if (empty($_POST['rcon_game_username'])) {
+                wc_add_notice(__('Le pseudo In-Game est requis pour ce produit.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+            
+            $username = sanitize_text_field($_POST['rcon_game_username']);
+            
+            if (strlen($username) > 50 || strlen($username) < 2) {
+                wc_add_notice(__('Le pseudo doit contenir entre 2 et 50 caractères.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+            
+            if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
+                wc_add_notice(__('Le pseudo ne peut contenir que des lettres, chiffres, tirets, points et underscores.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+        }
+        
+        if ($this->is_steamid_field_enabled()) {
+            if (empty($_POST['rcon_steam_id'])) {
+                wc_add_notice(__('Le SteamID64 est requis pour ce produit.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+            
+            $steam_id = sanitize_text_field($_POST['rcon_steam_id']);
+            
+            if (!preg_match('/^[0-9]{17}$/', $steam_id)) {
+                wc_add_notice(__('Le SteamID64 doit contenir exactement 17 chiffres.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+            
+            if (strpos($steam_id, '7656119') !== 0) {
+                wc_add_notice(__('Le SteamID64 semble invalide. Il doit commencer par 7656119.', 'wc-server-game-rcon'), 'error');
+                return false;
+            }
+        }
+        
+        return $passed;
+    }
+
+    public function save_fields_to_session() {
+        if (!WC()->session) {
+            return;
+        }
+        
+        if ($this->is_username_field_enabled() && !empty($_POST['rcon_game_username'])) {
+            $username = $this->sanitize_game_username($_POST['rcon_game_username']);
+            WC()->session->set('rcon_game_username', $username);
+            $this->debug_log("Game username saved to session: {$username}");
+        }
+        
+        if ($this->is_steamid_field_enabled() && !empty($_POST['rcon_steam_id'])) {
+            $steam_id = $this->sanitize_steam_id($_POST['rcon_steam_id']);
+            WC()->session->set('rcon_steam_id', $steam_id);
+            $this->debug_log("SteamID saved to session: {$steam_id}");
+        }
+    }
+
+    public function save_session_fields_to_order($order, $data) {
+        if (!WC()->session) {
+            return;
+        }
+        
+        $username = WC()->session->get('rcon_game_username', '');
+        $steam_id = WC()->session->get('rcon_steam_id', '');
+        
+        if ($this->is_username_field_enabled() && !empty($username)) {
+            $this->set_order_meta($order, '_game_username', $username);
+            $this->set_order_meta($order, '_game_username_source', 'product_page');
+            $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
+            $this->debug_log("Game username saved to order #{$order->get_id()}: {$username}");
+        }
+        
+        if ($this->is_steamid_field_enabled() && !empty($steam_id)) {
+            $this->set_order_meta($order, '_steam_id', $steam_id);
+            $this->set_order_meta($order, '_steam_id_source', 'product_page');
+            $this->set_order_meta($order, '_steam_id_verified_at', current_time('mysql'));
+            $this->debug_log("SteamID saved to order #{$order->get_id()}: {$steam_id}");
+        }
+    }
+
+    public function cleanup_session_fields($order_id) {
+        if (!WC()->session) {
+            return;
+        }
+        
+        WC()->session->__unset('rcon_game_username');
+        WC()->session->__unset('rcon_steam_id');
+        $this->debug_log("Session fields cleaned for order #{$order_id}");
+    }
+    // MÉTHODES UTILITAIRES
+    
     private function getVersion() {
         if (!isset($this->version)) {
             $plugin_data = get_plugin_data($this->plugin_file);
@@ -101,7 +252,6 @@ class WC_Server_Game_RCON {
         wp_clear_scheduled_hook($this->hook_retry);
     }
 
-    // FIX: Nettoyage optimisé avec SplFileObject
     public function cleanup_old_logs() {
         if (!file_exists($this->log_file) || filesize($this->log_file) <= 10 * 1024 * 1024) {
             return;
@@ -151,6 +301,70 @@ class WC_Server_Game_RCON {
         @file_put_contents($this->log_file, $entry, FILE_APPEND | LOCK_EX);
     }
 
+    public function is_debug_enabled() {
+        $options = get_option($this->option_name, []);
+        return !empty($options['debug']);
+    }
+
+    private function is_username_field_enabled() {
+        $opts = get_option($this->option_name, []);
+        return !empty($opts['enable_username_field']);
+    }
+
+    private function is_steamid_field_enabled() {
+        $opts = get_option($this->option_name, []);
+        return !empty($opts['enable_steamid_field']);
+    }
+
+    private function should_verify_player_exists() {
+        $opts = get_option($this->option_name, []);
+        return !empty($opts['verify_player_exists']);
+    }
+
+    private function get_order_id($order) {
+        return is_object($order) ? $order->get_id() : intval($order);
+    }
+
+    private function get_order_meta($order, $meta_key, $single = true) {
+        if (is_object($order)) {
+            return $order->get_meta($meta_key, $single);
+        } else {
+            $order_id = intval($order);
+            return get_post_meta($order_id, $meta_key, $single);
+        }
+    }
+
+    private function set_order_meta($order, $meta_key, $meta_value) {
+        if (is_object($order)) {
+            $order->update_meta_data($meta_key, $meta_value);
+            $order->save();
+        } else {
+            $order_id = intval($order);
+            update_post_meta($order_id, $meta_key, $meta_value);
+        }
+    }
+
+    private function delete_order_meta($order, $meta_key) {
+        if (is_object($order)) {
+            $order->delete_meta_data($meta_key);
+            $order->save();
+        } else {
+            $order_id = intval($order);
+            delete_post_meta($order_id, $meta_key);
+        }
+    }
+
+    private function sanitize_game_username($username) {
+        $username = sanitize_text_field($username);
+        return preg_replace('/[^a-zA-Z0-9_.-]/', '', $username);
+    }
+
+    private function sanitize_steam_id($steam_id) {
+        $steam_id = sanitize_text_field($steam_id);
+        return preg_replace('/[^0-9]/', '', $steam_id);
+    }
+    // INTERFACE ADMIN
+    
     public function add_admin_menu() {
         add_options_page('Server Game RCON', 'Server Game RCON', 'manage_options', 'server-game-rcon', [$this, 'options_page']);
     }
@@ -167,7 +381,6 @@ class WC_Server_Game_RCON {
         add_settings_field('debug', 'Debug', [$this, 'field_debug_render'], 'serverGameRcon', 'server_game_rcon_section');
     }
 
-    // FIX: Validation JSON avec json_last_error()
     public function sanitize_settings($input) {
         $out = [];
         
@@ -186,8 +399,6 @@ class WC_Server_Game_RCON {
                 $decoded = json_decode(stripslashes($input['servers']), true);
                 if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
                     $servers = $decoded;
-                } else {
-                    $this->debug_log("JSON decode failed: " . json_last_error_msg(), null, 'ERROR');
                 }
             }
         }
@@ -240,20 +451,41 @@ class WC_Server_Game_RCON {
 
     public function field_enable_username_render() {
         $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo de jeu au checkout', 
+        printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo de jeu', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_username_field']), true, false));
-        echo '<p class="description">Variable: {game_username}</p>';
+        echo '<p class="description">Variable: {game_username} - S\'affiche sur la page produit</p>';
     }
 
     public function field_enable_steamid_render() {
         $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[enable_steamid_field]" value="1" %s> Afficher le champ SteamID64 au checkout', 
+        printf('<input type="checkbox" name="%s[enable_steamid_field]" value="1" %s> Afficher le champ SteamID64', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_steamid_field']), true, false));
-        echo '<p class="description">Recommandé pour Valheim. Variable: {steam_id}</p>';
+        echo '<p class="description">Recommandé pour Valheim. Variable: {steam_id} - S\'affiche sur la page produit</p>';
     }
 
+    public function field_verify_player_render() {
+        $opts = get_option($this->option_name, []);
+        printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur', 
+               esc_attr($this->option_name), 
+               checked(!empty($opts['verify_player_exists']), true, false));
+        echo '<p class="description"><strong>Non recommandé pour Valheim</strong></p>';
+    }
+
+    public function field_auto_retry_render() {
+        $opts = get_option($this->option_name, []);
+        printf('<input type="checkbox" name="%s[auto_retry]" value="1" %s> Planifier retry pour commandes échouées', 
+               esc_attr($this->option_name), 
+               checked(!empty($opts['auto_retry']), true, false));
+    }
+
+    public function field_debug_render() {
+        $opts = get_option($this->option_name, []);
+        printf('<input type="checkbox" name="%s[debug]" value="1" %s> Activer debug détaillé', 
+               esc_attr($this->option_name), 
+               checked(!empty($opts['debug']), true, false));
+    }
     public function field_servers_render() {
         $opts = get_option($this->option_name, []);
         $servers = $opts['servers'] ?? [];
@@ -369,24 +601,6 @@ class WC_Server_Game_RCON {
         <?php
     }
 
-    public function field_verify_player_render() {
-        $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur', 
-               esc_attr($this->option_name), 
-               checked(!empty($opts['verify_player_exists']), true, false));
-        echo '<p class="description"><strong>Non recommandé pour Valheim</strong></p>';
-    }
-
-    public function field_auto_retry_render() {
-        $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[auto_retry]" value="1" %s> Planifier retry pour commandes échouées', esc_attr($this->option_name), checked(!empty($opts['auto_retry']), true, false));
-    }
-
-    public function field_debug_render() {
-        $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[debug]" value="1" %s> Activer debug détaillé', esc_attr($this->option_name), checked(!empty($opts['debug']), true, false));
-    }
-
     public function options_page() {
         if (!current_user_can('manage_options')) return;
         
@@ -411,6 +625,10 @@ class WC_Server_Game_RCON {
                     <a href="<?php echo admin_url('plugins.php'); ?>" class="button button-secondary" style="margin-left: 10px;">Mettre à jour</a>
                 <?php endif; ?>
                 </p>
+            </div>
+
+            <div class="notice notice-success">
+                <p><strong>Mode hybride activé :</strong> Les champs s'affichent sur la page produit (compatible Elementor)</p>
             </div>
 
             <div class="notice notice-warning">
@@ -459,8 +677,7 @@ class WC_Server_Game_RCON {
         $nonce_send = wp_create_nonce('server_game_send_rcon_manual');
         $nonce_reset = wp_create_nonce('server_game_reset_rcon_status');
         
-        // FIX: Rate limiting côté client
-        $script = <<<JS
+        $script = "
         jQuery(document).ready(function($){
             let lastRequest = 0;
             const minInterval = 1000;
@@ -494,7 +711,7 @@ class WC_Server_Game_RCON {
                     }
                     
                     var server = servers[0];
-                    var timeout = $("input[name='{$this->option_name}[timeout]']").val() || server.timeout || 10;
+                    var timeout = $(\"input[name='{$this->option_name}[timeout]']\").val() || server.timeout || 10;
                     
                     button.prop('disabled', true).text('Test en cours...');
                     $.post(ajaxurl, {
@@ -588,7 +805,7 @@ class WC_Server_Game_RCON {
                 }
             });
         });
-JS;
+        ";
 
         wp_add_inline_script('jquery', $script);
     }
@@ -631,6 +848,7 @@ JS;
         <p class="description"><strong>Exemples Valheim:</strong><br>
         <code>broadcast Bienvenue {billing_first_name} !</code><br>
         <code>say Merci pour votre achat #{order_id}</code></p>
+        <p class="description" style="color: #0073aa;"><strong>Les champs s'affichent automatiquement sur la page produit</strong></p>
         <?php
     }
 
@@ -652,15 +870,29 @@ JS;
         }
         update_post_meta($post_id, '_server_game_rcon_server', $server_sel);
     }
-
+    // GESTION DES COMMANDES ET AFFICHAGE
+    
     public function render_order_manual_send_button($order) {
         if (!current_user_can('manage_woocommerce')) return;
         
         $order_id = $this->get_order_id($order);
         $already_sent = $this->get_order_meta($order, '_server_game_rcon_sent');
         
+        $game_username = $this->get_order_meta($order, '_game_username');
+        $steam_id = $this->get_order_meta($order, '_steam_id');
+        $source = $this->get_order_meta($order, '_game_username_source');
+        
         echo '<div style="margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 4px solid #2196F3;">';
         echo '<h4>Server Game RCON</h4>';
+        
+        if ($game_username || $steam_id) {
+            echo '<p style="margin: 5px 0;"><strong>Données capturées:</strong></p>';
+            echo '<ul style="margin: 5px 0 10px 20px;">';
+            if ($game_username) echo '<li>Pseudo: <code>' . esc_html($game_username) . '</code>' . ($source ? ' <small>(via ' . esc_html($source) . ')</small>' : '') . '</li>';
+            if ($steam_id) echo '<li>SteamID: <code>' . esc_html($steam_id) . '</code></li>';
+            echo '</ul>';
+        }
+        
         echo '<button class="button server-game-send-rcon" data-order-id="'.esc_attr($order_id).'">Renvoyer commandes RCON</button>';
         
         if ($already_sent === 'yes') {
@@ -699,88 +931,178 @@ JS;
         echo '</ul></div>';
     }
 
-    // FIX: Lock atomique avec flock()
-    public function maybe_send_rcon($order_id, $old_status, $new_status, $order) {
-        $status = str_replace('wc-', '', (string) $new_status);
+    public function add_order_columns($columns) {
+        $columns['rcon_status'] = __('RCON', 'wc-server-game-rcon');
+        return $columns;
+    }
+
+    public function render_order_columns_legacy($column, $post_id) {
+        if ($column === 'rcon_status') {
+            $logs = get_post_meta($post_id, $this->history_meta, true);
+            $this->render_rcon_status_column($logs);
+        }
+    }
+
+    public function render_order_columns_hpos($column, $order) {
+        if ($column === 'rcon_status') {
+            $logs = $this->get_order_meta($order, $this->history_meta);
+            $this->render_rcon_status_column($logs);
+        }
+    }
+
+    private function render_rcon_status_column($logs) {
+        if (empty($logs) || !is_array($logs)) {
+            echo '<span style="color:gray;" title="Aucun envoi">—</span>';
+        } else {
+            $last = end($logs);
+            $success = !empty($last['success']);
+            $icon = $success ? '✅' : '❌';
+            $color = $success ? 'green' : 'red';
+            $title = $success ? 'Envoyé avec succès' : 'Échec d\'envoi';
+            echo "<span style='color:{$color};' title='{$title}'>{$icon}</span>";
+        }
+    }
+
+    // FALLBACK CHECKOUT CLASSIQUE
+    
+    public function add_billing_custom_fields($checkout) {
+        $session_username = WC()->session ? WC()->session->get('rcon_game_username', '') : '';
+        $session_steamid = WC()->session ? WC()->session->get('rcon_steam_id', '') : '';
         
-        $lock_file = sys_get_temp_dir() . '/rcon_lock_' . $order_id . '.lock';
-        $lock_handle = @fopen($lock_file, 'c');
-        
-        if (!$lock_handle) {
-            $this->debug_log("Could not create lock file for order {$order_id}", null, 'ERROR');
+        if ($session_username && $session_steamid) {
             return;
         }
         
-        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
-            $this->debug_log("RCON already processing for order {$order_id}, skipping", null, 'INFO');
-            fclose($lock_handle);
+        echo '<div id="server_game_rcon_fields">';
+        echo '<h3>Informations de jeu</h3>';
+        
+        if ($this->is_username_field_enabled()) {
+            woocommerce_form_field('game_username', [
+                'type' => 'text',
+                'class' => ['form-row-wide'],
+                'label' => __('Nom d\'utilisateur de jeu *'),
+                'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu'),
+                'required' => true,
+                'description' => __('Ce nom doit correspondre exactement à votre pseudo dans le jeu.'),
+                'custom_attributes' => [
+                    'maxlength' => '50',
+                    'pattern' => '[a-zA-Z0-9_.-]+',
+                    'title' => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
+                ]
+            ], $checkout->get_value('game_username'));
+        }
+        
+        if ($this->is_steamid_field_enabled()) {
+            woocommerce_form_field('steam_id', [
+                'type' => 'text',
+                'class' => ['form-row-wide'],
+                'label' => __('SteamID64 *'),
+                'placeholder' => __('Votre SteamID64 (17 chiffres)'),
+                'required' => true,
+                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank">steamid.io</a>'),
+                'custom_attributes' => [
+                    'maxlength' => '17',
+                    'pattern' => '[0-9]{17}',
+                    'title' => 'Votre SteamID64 doit contenir exactement 17 chiffres'
+                ]
+            ], $checkout->get_value('steam_id'));
+        }
+        
+        echo '</div>';
+    }
+
+    public function validate_game_username() {
+        if (WC()->session && WC()->session->get('rcon_game_username', '')) {
             return;
         }
         
-        try {
-            if ($status === 'completed') {
-                if (!$order instanceof WC_Order) {
-                    $order = wc_get_order($order_id);
-                }
-                if ($order) {
-                    $already_sent = $this->get_order_meta($order, '_server_game_rcon_sent');
-                    if ($already_sent === 'yes') {
-                        $this->debug_log("RCON already sent for order {$order_id}, skipping", null, 'INFO');
-                        return;
-                    }
-                    
-                    $this->debug_log("Sending RCON for order {$order_id} ({$old_status} → {$new_status})", null, 'INFO');
-                    $success = $this->send_rcon_commands_grouped($order);
-                    
-                    if ($success) {
-                        $this->set_order_meta($order, '_server_game_rcon_sent', 'yes');
-                        $this->set_order_meta($order, '_server_game_rcon_sent_at', current_time('mysql'));
-                        $this->debug_log("RCON successfully sent for order {$order_id}", null, 'INFO');
-                    }
-                } else {
-                    $this->debug_log("ERROR: Unable to load WC_Order for order_id={$order_id}", null, 'ERROR');
-                }
+        if ($this->is_username_field_enabled()) {
+            if (empty($_POST['game_username'])) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
+                return;
             }
-        } finally {
-            flock($lock_handle, LOCK_UN);
-            fclose($lock_handle);
-            @unlink($lock_file);
+            
+            $username = sanitize_text_field($_POST['game_username']);
+            
+            if (strlen($username) > 50 || strlen($username) < 2) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu doit contenir entre 2 et 50 caractères.'), 'error');
+                return;
+            }
+            
+            if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
+                wc_add_notice(__('Le nom d\'utilisateur de jeu ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
+                return;
+            }
+        }
+        
+        if ($this->is_steamid_field_enabled()) {
+            if (empty($_POST['steam_id'])) {
+                wc_add_notice(__('Le SteamID64 est requis.'), 'error');
+                return;
+            }
+            
+            $steam_id = sanitize_text_field($_POST['steam_id']);
+            
+            if (!preg_match('/^[0-9]{17}$/', $steam_id)) {
+                wc_add_notice(__('Le SteamID64 doit contenir exactement 17 chiffres.'), 'error');
+                return;
+            }
+            
+            if (strpos($steam_id, '7656119') !== 0) {
+                wc_add_notice(__('Le SteamID64 semble invalide. Il doit commencer par 7656119.'), 'error');
+                return;
+            }
         }
     }
 
-    private function get_order_id($order) {
-        return is_object($order) ? $order->get_id() : intval($order);
-    }
-
-    private function get_order_meta($order, $meta_key, $single = true) {
-        if (is_object($order)) {
-            return $order->get_meta($meta_key, $single);
-        } else {
-            $order_id = intval($order);
-            return get_post_meta($order_id, $meta_key, $single);
+    public function save_custom_checkout_fields_new($order, $data) {
+        if ($this->get_order_meta($order, '_game_username_source') === 'product_page') {
+            return;
+        }
+        
+        if ($this->is_username_field_enabled() && !empty($_POST['game_username'])) {
+            $username = $this->sanitize_game_username($_POST['game_username']);
+            $this->set_order_meta($order, '_game_username', $username);
+            $this->set_order_meta($order, '_game_username_source', 'checkout');
+            $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
+        }
+        
+        if ($this->is_steamid_field_enabled() && !empty($_POST['steam_id'])) {
+            $steam_id = $this->sanitize_steam_id($_POST['steam_id']);
+            $this->set_order_meta($order, '_steam_id', $steam_id);
+            $this->set_order_meta($order, '_steam_id_source', 'checkout');
+            $this->set_order_meta($order, '_steam_id_verified_at', current_time('mysql'));
         }
     }
 
-    private function set_order_meta($order, $meta_key, $meta_value) {
-        if (is_object($order)) {
-            $order->update_meta_data($meta_key, $meta_value);
-            $order->save();
-        } else {
-            $order_id = intval($order);
-            update_post_meta($order_id, $meta_key, $meta_value);
+    public function verify_player_exists_on_server($username) {
+        $opts = get_option($this->option_name, []);
+        $servers = $this->get_configured_servers($opts);
+        
+        if (empty($servers)) {
+            return ['success' => false, 'message' => 'Aucun serveur configuré'];
         }
+        
+        foreach ($servers as $server) {
+            $host = $server['host'] ?? '';
+            $port = intval($server['port'] ?? 2457);
+            $password = $server['password'] ?? '';
+            $timeout = intval($server['timeout'] ?? 10);
+            
+            if (empty($host) || empty($password)) continue;
+            
+            $result = $this->execute_rcon_command($host, $port, $password, 'info', $timeout);
+            
+            if ($result['success']) {
+                return ['success' => true, 'player_found' => true, 'note' => 'Valheim ne supporte pas la vérification de joueur via RCON'];
+            }
+        }
+        
+        return ['success' => false, 'message' => 'Impossible de se connecter aux serveurs'];
     }
 
-    private function delete_order_meta($order, $meta_key) {
-        if (is_object($order)) {
-            $order->delete_meta_data($meta_key);
-            $order->save();
-        } else {
-            $order_id = intval($order);
-            delete_post_meta($order_id, $meta_key);
-        }
-    }
-
+    // AJAX HANDLERS
+    
     public function ajax_test_rcon_connection() {
         check_ajax_referer('server_game_test_rcon_nonce', 'nonce');
         if (!current_user_can('manage_options')) {
@@ -860,6 +1182,55 @@ JS;
         }
         
         wp_send_json_success(['message' => 'Logs vidés']);
+    }
+    // LOGIQUE RCON PRINCIPALE
+    
+    public function maybe_send_rcon($order_id, $old_status, $new_status, $order) {
+        $status = str_replace('wc-', '', (string) $new_status);
+        
+        $lock_file = sys_get_temp_dir() . '/rcon_lock_' . $order_id . '.lock';
+        $lock_handle = @fopen($lock_file, 'c');
+        
+        if (!$lock_handle) {
+            $this->debug_log("Could not create lock file for order {$order_id}", null, 'ERROR');
+            return;
+        }
+        
+        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
+            $this->debug_log("RCON already processing for order {$order_id}, skipping", null, 'INFO');
+            fclose($lock_handle);
+            return;
+        }
+        
+        try {
+            if ($status === 'completed') {
+                if (!$order instanceof WC_Order) {
+                    $order = wc_get_order($order_id);
+                }
+                if ($order) {
+                    $already_sent = $this->get_order_meta($order, '_server_game_rcon_sent');
+                    if ($already_sent === 'yes') {
+                        $this->debug_log("RCON already sent for order {$order_id}, skipping", null, 'INFO');
+                        return;
+                    }
+                    
+                    $this->debug_log("Sending RCON for order {$order_id} ({$old_status} → {$new_status})", null, 'INFO');
+                    $success = $this->send_rcon_commands_grouped($order);
+                    
+                    if ($success) {
+                        $this->set_order_meta($order, '_server_game_rcon_sent', 'yes');
+                        $this->set_order_meta($order, '_server_game_rcon_sent_at', current_time('mysql'));
+                        $this->debug_log("RCON successfully sent for order {$order_id}", null, 'INFO');
+                    }
+                } else {
+                    $this->debug_log("ERROR: Unable to load WC_Order for order_id={$order_id}", null, 'ERROR');
+                }
+            }
+        } finally {
+            flock($lock_handle, LOCK_UN);
+            fclose($lock_handle);
+            @unlink($lock_file);
+        }
     }
 
     public function send_rcon_commands_grouped($order_input, $manual = false) {
@@ -1021,7 +1392,6 @@ JS;
         }
     }
 
-    // FIX: Garantir fermeture socket dans finally
     private function process_server_commands($srv, $si, $entries, $order_id) {
         $server_name = $srv['name'] ?? "Server-{$si}";
         $host = $srv['host'] ?? '';
@@ -1084,7 +1454,6 @@ JS;
         return $result;
     }
 
-    // FIX: Nettoyage ressources et pas de fuite
     private function establish_rcon_connection($host, $port, $timeout) {
         $max_attempts = 2;
         $fp = null;
@@ -1163,16 +1532,6 @@ JS;
         return trim($command);
     }
 
-    private function sanitize_game_username($username) {
-        $username = sanitize_text_field($username);
-        return preg_replace('/[^a-zA-Z0-9_.-]/', '', $username);
-    }
-
-    private function sanitize_steam_id($steam_id) {
-        $steam_id = sanitize_text_field($steam_id);
-        return preg_replace('/[^0-9]/', '', $steam_id);
-    }
-
     private function save_order_history($order_id, $success, $message, $product_id = 0, $command = '', $response = '') {
         $order = is_object($order_id) ? $order_id : wc_get_order($order_id);
         $order_id_int = is_object($order_id) ? $order_id->get_id() : $order_id;
@@ -1201,7 +1560,6 @@ JS;
         $this->send_rcon_commands_grouped($order_id);
     }
 
-    // FIX: Timeout précis avec microtime(true)
     private function read_rcon_response_safe($fp, $timeout = 10) {
         $start_time = microtime(true);
         $header = '';
@@ -1295,195 +1653,10 @@ JS;
         }
     }
 
-    public function add_order_columns($columns) {
-        $columns['rcon_status'] = __('RCON', 'wc-server-game-rcon');
-        return $columns;
-    }
-
-    public function render_order_columns_legacy($column, $post_id) {
-        if ($column === 'rcon_status') {
-            $logs = get_post_meta($post_id, $this->history_meta, true);
-            $this->render_rcon_status_column($logs);
-        }
-    }
-
-    public function render_order_columns_hpos($column, $order) {
-        if ($column === 'rcon_status') {
-            $logs = $this->get_order_meta($order, $this->history_meta);
-            $this->render_rcon_status_column($logs);
-        }
-    }
-
-    private function render_rcon_status_column($logs) {
-        if (empty($logs) || !is_array($logs)) {
-            echo '<span style="color:gray;" title="Aucun envoi">—</span>';
-        } else {
-            $last = end($logs);
-            $success = !empty($last['success']);
-            $icon = $success ? '✅' : '❌';
-            $color = $success ? 'green' : 'red';
-            $title = $success ? 'Envoyé avec succès' : 'Échec d\'envoi';
-            echo "<span style='color:{$color};' title='{$title}'>{$icon}</span>";
-        }
-    }
-
-    private function is_username_field_enabled() {
-        $opts = get_option($this->option_name, []);
-        return !empty($opts['enable_username_field']);
-    }
-
-    private function is_steamid_field_enabled() {
-        $opts = get_option($this->option_name, []);
-        return !empty($opts['enable_steamid_field']);
-    }
-
-    public function add_billing_custom_fields($checkout) {
-        echo '<div id="server_game_rcon_fields">';
-        
-        if ($this->is_username_field_enabled()) {
-            woocommerce_form_field('game_username', [
-                'type' => 'text',
-                'class' => ['form-row-wide'],
-                'label' => __('Nom d\'utilisateur de jeu *'),
-                'placeholder' => __('Votre nom d\'utilisateur exact dans le jeu'),
-                'required' => true,
-                'description' => __('Ce nom doit correspondre exactement à votre pseudo dans le jeu.'),
-                'custom_attributes' => [
-                    'maxlength' => '50',
-                    'pattern' => '[a-zA-Z0-9_.-]+',
-                    'title' => 'Seuls les lettres, chiffres, tirets, points et underscores sont autorisés'
-                ]
-            ], $checkout->get_value('game_username'));
-        }
-        
-        if ($this->is_steamid_field_enabled()) {
-            woocommerce_form_field('steam_id', [
-                'type' => 'text',
-                'class' => ['form-row-wide'],
-                'label' => __('SteamID64 *'),
-                'placeholder' => __('Votre SteamID64 (17 chiffres)'),
-                'required' => true,
-                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank">steamid.io</a>'),
-                'custom_attributes' => [
-                    'maxlength' => '17',
-                    'pattern' => '[0-9]{17}',
-                    'title' => 'Votre SteamID64 doit contenir exactement 17 chiffres'
-                ]
-            ], $checkout->get_value('steam_id'));
-        }
-        
-        echo '</div>';
-    }
-
-    // FIX: Remplacement de str_starts_with() pour PHP 7.4
-    public function validate_game_username() {
-        if ($this->is_username_field_enabled()) {
-            if (empty($_POST['game_username'])) {
-                wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
-                return;
-            }
-            
-            $username = sanitize_text_field($_POST['game_username']);
-            
-            if (strlen($username) > 50 || strlen($username) < 2) {
-                wc_add_notice(__('Le nom d\'utilisateur de jeu doit contenir entre 2 et 50 caractères.'), 'error');
-                return;
-            }
-            
-            if (!preg_match('/^[a-zA-Z0-9_.-]+$/', $username)) {
-                wc_add_notice(__('Le nom d\'utilisateur de jeu ne peut contenir que des lettres, chiffres, tirets, points et underscores.'), 'error');
-                return;
-            }
-        }
-        
-        if ($this->is_steamid_field_enabled()) {
-            if (empty($_POST['steam_id'])) {
-                wc_add_notice(__('Le SteamID64 est requis.'), 'error');
-                return;
-            }
-            
-            $steam_id = sanitize_text_field($_POST['steam_id']);
-            
-            if (!preg_match('/^[0-9]{17}$/', $steam_id)) {
-                wc_add_notice(__('Le SteamID64 doit contenir exactement 17 chiffres.'), 'error');
-                return;
-            }
-            
-            // FIX: Remplacement de str_starts_with() pour PHP 7.4
-            if (strpos($steam_id, '7656119') !== 0) {
-                wc_add_notice(__('Le SteamID64 semble invalide. Il doit commencer par 7656119.'), 'error');
-                return;
-            }
-        }
-        
-        if ($this->is_username_field_enabled() && $this->should_verify_player_exists()) {
-            $username = sanitize_text_field($_POST['game_username']);
-            $exists = $this->verify_player_exists_on_server($username);
-            if (!$exists['success']) {
-                wc_add_notice(__('Erreur de vérification: ') . $exists['message'], 'error');
-                return;
-            }
-            if (!$exists['player_found']) {
-                wc_add_notice(sprintf(
-                    __('Le joueur "%s" n\'a pas été trouvé sur le serveur. Note: La vérification n\'est pas fiable sur Valheim.'), 
-                    esc_html($username)
-                ), 'notice');
-            }
-        }
-    }
-
-    public function save_custom_checkout_fields_new($order, $data) {
-        if ($this->is_username_field_enabled() && !empty($_POST['game_username'])) {
-            $username = $this->sanitize_game_username($_POST['game_username']);
-            $this->set_order_meta($order, '_game_username', $username);
-            $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
-        }
-        
-        if ($this->is_steamid_field_enabled() && !empty($_POST['steam_id'])) {
-            $steam_id = $this->sanitize_steam_id($_POST['steam_id']);
-            $this->set_order_meta($order, '_steam_id', $steam_id);
-            $this->set_order_meta($order, '_steam_id_verified_at', current_time('mysql'));
-        }
-    }
-
-    private function should_verify_player_exists() {
-        $opts = get_option($this->option_name, []);
-        return !empty($opts['verify_player_exists']);
-    }
-
-    public function verify_player_exists_on_server($username) {
-        $opts = get_option($this->option_name, []);
-        $servers = $this->get_configured_servers($opts);
-        
-        if (empty($servers)) {
-            return ['success' => false, 'message' => 'Aucun serveur configuré'];
-        }
-        
-        foreach ($servers as $server) {
-            $host = $server['host'] ?? '';
-            $port = intval($server['port'] ?? 2457);
-            $password = $server['password'] ?? '';
-            $timeout = intval($server['timeout'] ?? 10);
-            
-            if (empty($host) || empty($password)) continue;
-            
-            $result = $this->execute_rcon_command($host, $port, $password, 'info', $timeout);
-            
-            if ($result['success']) {
-                return ['success' => true, 'player_found' => true, 'note' => 'Valheim ne supporte pas la vérification de joueur via RCON'];
-            }
-        }
-        
-        return ['success' => false, 'message' => 'Impossible de se connecter aux serveurs'];
-    }
-
-    public function is_debug_enabled() {
-        $options = get_option($this->option_name, []);
-        return !empty($options['debug']);
-    }
-}
+} // FIN DE LA CLASSE WC_Server_Game_RCON
 
 }
+// CLASSE GITHUB UPDATER
 
 class ServerGameRCONGitHubUpdater {
     private $file;
@@ -1620,7 +1793,6 @@ class ServerGameRCONGitHubUpdater {
         return !empty($this->github_response['tag_name']) ? ltrim($this->github_response['tag_name'], 'v') : false;
     }
     
-    // FIX: Validation JSON avec json_last_error()
     private function getRepositoryInfo() {
         if ($this->github_response !== null) {
             return;
@@ -1683,6 +1855,8 @@ class ServerGameRCONGitHubUpdater {
     }
 }
 
+// INITIALISATION DU PLUGIN
+
 add_action('plugins_loaded', function() {
     if (class_exists('WooCommerce')) {
         new WC_Server_Game_RCON();
@@ -1693,7 +1867,8 @@ add_action('plugins_loaded', function() {
     }
 });
 
-// FIX: Nettoyage SQL sécurisé avec $wpdb->prepare()
+// NETTOYAGE À LA DÉSACTIVATION
+
 register_deactivation_hook(__FILE__, function() {
     global $wpdb;
     
@@ -1708,4 +1883,3 @@ register_deactivation_hook(__FILE__, function() {
         )
     );
 });
-?>
