@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce Server Game RCON
  * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Optimisé pour Valheim
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Skylide
  * Requires PHP: 7.4
  * GitHub Plugin URI: skylidefr/WooCommerce-Server-Game-RCON
@@ -78,9 +78,6 @@ class WC_Server_Game_RCON {
         add_action('server_game_rcon_cleanup_logs', [$this, 'cleanup_old_logs']);
     }
 
-    /**
-     * Récupère la version du plugin depuis l'en-tête
-     */
     private function getVersion() {
         if (!isset($this->version)) {
             $plugin_data = get_plugin_data($this->plugin_file);
@@ -94,7 +91,6 @@ class WC_Server_Game_RCON {
             @file_put_contents($this->log_file, "Server Game RCON log created: " . date('c') . PHP_EOL);
         }
         
-        // Schedule cleanup task
         if (!wp_next_scheduled('server_game_rcon_cleanup_logs')) {
             wp_schedule_event(time(), 'weekly', 'server_game_rcon_cleanup_logs');
         }
@@ -105,12 +101,33 @@ class WC_Server_Game_RCON {
         wp_clear_scheduled_hook($this->hook_retry);
     }
 
+    // FIX: Nettoyage optimisé avec SplFileObject
     public function cleanup_old_logs() {
-        if (file_exists($this->log_file) && filesize($this->log_file) > 10 * 1024 * 1024) { // 10MB
-            $content = file_get_contents($this->log_file);
-            $lines = explode("\n", $content);
-            $keep_lines = array_slice($lines, -1000); // Keep last 1000 lines
-            file_put_contents($this->log_file, implode("\n", $keep_lines));
+        if (!file_exists($this->log_file) || filesize($this->log_file) <= 10 * 1024 * 1024) {
+            return;
+        }
+
+        try {
+            $temp_file = $this->log_file . '.tmp';
+            $file = new SplFileObject($this->log_file, 'r');
+            $temp = new SplFileObject($temp_file, 'w');
+            
+            $file->seek(PHP_INT_MAX);
+            $total_lines = $file->key();
+            
+            $start_line = max(0, $total_lines - 1000);
+            $file->seek($start_line);
+            
+            while (!$file->eof()) {
+                $temp->fwrite($file->fgets());
+            }
+            
+            unset($file);
+            unset($temp);
+            
+            @rename($temp_file, $this->log_file);
+        } catch (Exception $e) {
+            $this->debug_log("Cleanup failed: " . $e->getMessage(), null, 'ERROR');
         }
     }
 
@@ -119,7 +136,6 @@ class WC_Server_Game_RCON {
             return;
         }
         
-        // Sanitize sensitive data
         if (is_array($context) && isset($context['password'])) {
             $context['password'] = '[REDACTED]';
         }
@@ -134,8 +150,6 @@ class WC_Server_Game_RCON {
         $entry .= PHP_EOL;
         @file_put_contents($this->log_file, $entry, FILE_APPEND | LOCK_EX);
     }
-
-    /* ---------------- Admin: menu & settings ---------------- */
 
     public function add_admin_menu() {
         add_options_page('Server Game RCON', 'Server Game RCON', 'manage_options', 'server-game-rcon', [$this, 'options_page']);
@@ -153,10 +167,10 @@ class WC_Server_Game_RCON {
         add_settings_field('debug', 'Debug', [$this, 'field_debug_render'], 'serverGameRcon', 'server_game_rcon_section');
     }
 
+    // FIX: Validation JSON avec json_last_error()
     public function sanitize_settings($input) {
         $out = [];
         
-        // Sanitize basic options - Timeout augmenté pour Valheim
         $out['timeout'] = max(5, min(30, intval($input['timeout'] ?? 10)));
         $out['enable_username_field'] = !empty($input['enable_username_field']) ? 1 : 0;
         $out['enable_steamid_field'] = !empty($input['enable_steamid_field']) ? 1 : 0;
@@ -164,15 +178,16 @@ class WC_Server_Game_RCON {
         $out['verify_player_exists'] = !empty($input['verify_player_exists']) ? 1 : 0;
         $out['debug'] = !empty($input['debug']) ? 1 : 0;
 
-        // Sanitize servers
         $servers = [];
         if (isset($input['servers'])) {
             if (is_array($input['servers'])) {
                 $servers = $input['servers'];
             } else if (is_string($input['servers'])) {
                 $decoded = json_decode(stripslashes($input['servers']), true);
-                if (is_array($decoded)) {
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
                     $servers = $decoded;
+                } else {
+                    $this->debug_log("JSON decode failed: " . json_last_error_msg(), null, 'ERROR');
                 }
             }
         }
@@ -187,10 +202,9 @@ class WC_Server_Game_RCON {
             $password = sanitize_text_field($s['password'] ?? '');
             $timeout = max(5, min(30, intval($s['timeout'] ?? $out['timeout'])));
             
-            // Validate host format
             if (!empty($host) && !filter_var($host, FILTER_VALIDATE_IP) && !filter_var('http://' . $host, FILTER_VALIDATE_URL)) {
                 if (!preg_match('/^[a-zA-Z0-9.-]+$/', $host)) {
-                    continue; // Skip invalid hosts
+                    continue;
                 }
             }
             
@@ -205,7 +219,6 @@ class WC_Server_Game_RCON {
             }
         }
 
-        // Legacy migration
         if (empty($out['servers']) && !empty($input['host']) && !empty($input['password'])) {
             $out['servers'][] = [
                 'name' => 'Default',
@@ -222,7 +235,7 @@ class WC_Server_Game_RCON {
     public function field_timeout_render() {
         $opts = get_option($this->option_name, []);
         printf('<input type="number" name="%s[timeout]" value="%d" min="5" max="30" step="1"> secondes', esc_attr($this->option_name), intval($opts['timeout'] ?? 10));
-        echo '<p class="description">Recommandé: 10-15 secondes pour Valheim (les serveurs sont lents à répondre)</p>';
+        echo '<p class="description">Recommandé: 10-15 secondes pour Valheim</p>';
     }
 
     public function field_enable_username_render() {
@@ -230,7 +243,7 @@ class WC_Server_Game_RCON {
         printf('<input type="checkbox" name="%s[enable_username_field]" value="1" %s> Afficher le champ pseudo de jeu au checkout', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_username_field']), true, false));
-        echo '<p class="description">Si activé, les clients devront saisir leur pseudo de jeu lors de la commande. Utilisez {game_username} dans vos commandes.</p>';
+        echo '<p class="description">Variable: {game_username}</p>';
     }
 
     public function field_enable_steamid_render() {
@@ -238,7 +251,7 @@ class WC_Server_Game_RCON {
         printf('<input type="checkbox" name="%s[enable_steamid_field]" value="1" %s> Afficher le champ SteamID64 au checkout', 
                esc_attr($this->option_name), 
                checked(!empty($opts['enable_steamid_field']), true, false));
-        echo '<p class="description">Recommandé pour Valheim. Nécessaire pour les commandes admin (ban, kick, permit). Utilisez {steam_id} dans vos commandes.</p>';
+        echo '<p class="description">Recommandé pour Valheim. Variable: {steam_id}</p>';
     }
 
     public function field_servers_render() {
@@ -267,7 +280,7 @@ class WC_Server_Game_RCON {
                     <button type="button" class="button" id="server-game-add-rcon-server">+ Ajouter un serveur</button>
                 </p>
                 <input type="hidden" name="<?php echo esc_attr($this->option_name); ?>[servers]" id="server_game_rcon_servers" value="<?php echo esc_attr($json); ?>" />
-                <p class="description">Port RCON Valheim par défaut: <strong>2457</strong>. Ajoutez, supprimez ou éditez les serveurs.</p>
+                <p class="description">Port RCON Valheim par défaut: <strong>2457</strong></p>
             </td>
         </tr>
         </table>
@@ -358,10 +371,10 @@ class WC_Server_Game_RCON {
 
     public function field_verify_player_render() {
         $opts = get_option($this->option_name, []);
-        printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur avant validation de commande', 
+        printf('<input type="checkbox" name="%s[verify_player_exists]" value="1" %s> Vérifier que le joueur existe sur le serveur', 
                esc_attr($this->option_name), 
                checked(!empty($opts['verify_player_exists']), true, false));
-        echo '<p class="description"><strong>Non recommandé pour Valheim</strong> : Le serveur ne fournit pas de liste de joueurs via RCON.</p>';
+        echo '<p class="description"><strong>Non recommandé pour Valheim</strong></p>';
     }
 
     public function field_auto_retry_render() {
@@ -377,7 +390,6 @@ class WC_Server_Game_RCON {
     public function options_page() {
         if (!current_user_can('manage_options')) return;
         
-        // Vérifier s'il y a une mise à jour
         $updater = new ServerGameRCONGitHubUpdater($this->plugin_file);
         $has_update = false;
         $new_version = '';
@@ -392,7 +404,6 @@ class WC_Server_Game_RCON {
         <div class="wrap">
             <h1>Server Game RCON - Valheim Edition</h1>
             
-            <!-- Section de mise à jour -->
             <div class="notice notice-info">
                 <p><strong>Version actuelle :</strong> <?php echo esc_html($this->getVersion()); ?>
                 <?php if ($has_update && $new_version): ?>
@@ -402,15 +413,13 @@ class WC_Server_Game_RCON {
                 </p>
             </div>
 
-            <!-- Info Valheim -->
             <div class="notice notice-warning">
                 <p><strong>Configuration Valheim :</strong></p>
                 <ul style="margin-left: 20px;">
                     <li>Port RCON par défaut : <strong>2457</strong></li>
-                    <li>Timeout recommandé : <strong>10-15 secondes</strong> (les serveurs Valheim sont lents)</li>
+                    <li>Timeout recommandé : <strong>10-15 secondes</strong></li>
                     <li>Commandes fiables : <code>broadcast</code>, <code>say</code>, <code>save</code></li>
                     <li>Variables disponibles : {game_username}, {steam_id}, {billing_first_name}, {order_id}</li>
-                    <li>La vérification de joueur n'est pas supportée par Valheim RCON</li>
                 </ul>
             </div>
             
@@ -450,102 +459,124 @@ class WC_Server_Game_RCON {
         $nonce_send = wp_create_nonce('server_game_send_rcon_manual');
         $nonce_reset = wp_create_nonce('server_game_reset_rcon_status');
         
+        // FIX: Rate limiting côté client
         $script = <<<JS
         jQuery(document).ready(function($){
-            $('#server-game-test-rcon').off('click.server_game').on('click.server_game', function(e){
-                e.preventDefault();
-                var button = $(this);
-                var original = button.text();
-                
-                var servers = [];
-                try {
-                    servers = JSON.parse($('#server_game_rcon_servers').val() || '[]');
-                } catch(e) {
-                    servers = [];
-                }
-                
-                if (servers.length === 0) {
-                    alert('Aucun serveur configuré pour le test');
+            let lastRequest = 0;
+            const minInterval = 1000;
+            
+            function throttle(fn) {
+                const now = Date.now();
+                if (now - lastRequest < minInterval) {
+                    alert('Veuillez patienter avant de faire une nouvelle requête.');
                     return;
                 }
-                
-                var server = servers[0];
-                var timeout = $("input[name='{$this->option_name}[timeout]']").val() || server.timeout || 10;
-                
-                button.prop('disabled', true).text('Test en cours...');
-                $.post(ajaxurl, {
-                    action: 'server_game_test_rcon_connection',
-                    nonce: '{$nonce_test}',
-                    host: server.host || '',
-                    port: server.port || '',
-                    password: server.password || '',
-                    timeout: timeout
-                }, function(resp){
-                    if (resp && resp.success) {
-                        alert('Connexion OK sur ' + (server.name || 'serveur') + ' (' + server.host + ':' + server.port + '): ' + (resp.data.message || 'OK'));
-                    } else {
-                        alert('Échec connexion sur ' + (server.name || 'serveur') + ': ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
+                lastRequest = now;
+                fn();
+            }
+            
+            $('#server-game-test-rcon').off('click.server_game').on('click.server_game', function(e){
+                e.preventDefault();
+                throttle(function() {
+                    var button = $('#server-game-test-rcon');
+                    var original = button.text();
+                    
+                    var servers = [];
+                    try {
+                        servers = JSON.parse($('#server_game_rcon_servers').val() || '[]');
+                    } catch(e) {
+                        servers = [];
                     }
-                }).fail(function(xhr){
-                    alert('Erreur AJAX: ' + xhr.status);
-                }).always(function(){ 
-                    button.prop('disabled', false).text(original); 
+                    
+                    if (servers.length === 0) {
+                        alert('Aucun serveur configuré pour le test');
+                        return;
+                    }
+                    
+                    var server = servers[0];
+                    var timeout = $("input[name='{$this->option_name}[timeout]']").val() || server.timeout || 10;
+                    
+                    button.prop('disabled', true).text('Test en cours...');
+                    $.post(ajaxurl, {
+                        action: 'server_game_test_rcon_connection',
+                        nonce: '{$nonce_test}',
+                        host: server.host || '',
+                        port: server.port || '',
+                        password: server.password || '',
+                        timeout: timeout
+                    }, function(resp){
+                        if (resp && resp.success) {
+                            alert('Connexion OK sur ' + (server.name || 'serveur') + ': ' + (resp.data.message || 'OK'));
+                        } else {
+                            alert('Échec connexion: ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
+                        }
+                    }).fail(function(xhr){
+                        alert('Erreur AJAX: ' + xhr.status);
+                    }).always(function(){ 
+                        button.prop('disabled', false).text(original); 
+                    });
                 });
             });
 
             $(document).off('click.server_game', '.server-game-send-rcon').on('click.server_game', '.server-game-send-rcon', function(e){
                 e.preventDefault();
-                if (!confirm('Renvoyer les commandes RCON pour cette commande ?')) return;
-                var orderId = $(this).data('order-id');
-                var btn = $(this);
-                var orig = btn.text();
-                btn.prop('disabled', true).text('Envoi...');
-                $.post(ajaxurl, {
-                    action: 'server_game_send_rcon_manual',
-                    nonce: '{$nonce_send}',
-                    order_id: orderId
-                }, function(resp){
-                    if (resp && resp.success) {
-                        alert('Succès: ' + (resp.data.message || 'OK'));
-                        location.reload();
-                    } else {
-                        alert('Échec: ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
-                    }
-                }).fail(function(xhr){
-                    alert('Erreur AJAX: ' + xhr.status);
-                }).always(function(){ 
-                    btn.prop('disabled', false).text(orig); 
+                if (!confirm('Renvoyer les commandes RCON ?')) return;
+                
+                throttle(function() {
+                    var orderId = $('.server-game-send-rcon').data('order-id');
+                    var btn = $('.server-game-send-rcon');
+                    var orig = btn.text();
+                    btn.prop('disabled', true).text('Envoi...');
+                    $.post(ajaxurl, {
+                        action: 'server_game_send_rcon_manual',
+                        nonce: '{$nonce_send}',
+                        order_id: orderId
+                    }, function(resp){
+                        if (resp && resp.success) {
+                            alert('Succès: ' + (resp.data.message || 'OK'));
+                            location.reload();
+                        } else {
+                            alert('Échec: ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
+                        }
+                    }).fail(function(xhr){
+                        alert('Erreur AJAX: ' + xhr.status);
+                    }).always(function(){ 
+                        btn.prop('disabled', false).text(orig); 
+                    });
                 });
             });
             
             $(document).off('click.server_game', '.server-game-reset-rcon').on('click.server_game', '.server-game-reset-rcon', function(e){
                 e.preventDefault();
-                if (!confirm('Réinitialiser le statut d\'envoi RCON pour cette commande ?\\n\\nCeci permettra au système de renvoyer automatiquement les commandes.')) return;
-                var orderId = $(this).data('order-id');
-                var btn = $(this);
-                var orig = btn.text();
-                btn.prop('disabled', true).text('Reset...');
-                $.post(ajaxurl, {
-                    action: 'server_game_reset_rcon_status',
-                    nonce: '{$nonce_reset}',
-                    order_id: orderId
-                }, function(resp){
-                    if (resp && resp.success) {
-                        alert('Statut réinitialisé avec succès');
-                        location.reload();
-                    } else {
-                        alert('Échec: ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
-                    }
-                }).fail(function(xhr){
-                    alert('Erreur AJAX: ' + xhr.status);
-                }).always(function(){ 
-                    btn.prop('disabled', false).text(orig); 
+                if (!confirm('Réinitialiser le statut RCON ?')) return;
+                
+                throttle(function() {
+                    var orderId = $('.server-game-reset-rcon').data('order-id');
+                    var btn = $('.server-game-reset-rcon');
+                    var orig = btn.text();
+                    btn.prop('disabled', true).text('Reset...');
+                    $.post(ajaxurl, {
+                        action: 'server_game_reset_rcon_status',
+                        nonce: '{$nonce_reset}',
+                        order_id: orderId
+                    }, function(resp){
+                        if (resp && resp.success) {
+                            alert('Statut réinitialisé');
+                            location.reload();
+                        } else {
+                            alert('Échec: ' + (resp.data && resp.data.message ? resp.data.message : 'Erreur inconnue'));
+                        }
+                    }).fail(function(xhr){
+                        alert('Erreur AJAX: ' + xhr.status);
+                    }).always(function(){ 
+                        btn.prop('disabled', false).text(orig); 
+                    });
                 });
             });
 
             $('#server-game-clear-logs').off('click.server_game').on('click.server_game', function(e){
                 e.preventDefault();
-                if (confirm('Êtes-vous sûr de vouloir vider les logs ?')) {
+                if (confirm('Vider les logs ?')) {
                     $.post(ajaxurl, {
                         action: 'server_game_clear_logs',
                         nonce: '{$nonce_test}'
@@ -561,8 +592,6 @@ JS;
 
         wp_add_inline_script('jquery', $script);
     }
-
-    /* ---------------- Product metabox ---------------- */
 
     public function add_product_metabox() {
         add_meta_box('server_game_rcon_product', 'Server Game RCON', [$this, 'render_product_metabox'], 'product', 'side', 'default');
@@ -597,7 +626,7 @@ JS;
 
         <p><label>Commandes RCON (une par ligne)</label></p>
         <p><textarea name="server_game_rcon_commands" style="width:100%;height:120px;" maxlength="<?php echo $this->max_command_length * 10; ?>"><?php echo esc_textarea($value); ?></textarea></p>
-        <p class="description"><strong>Valheim - Variables disponibles:</strong><br>
+        <p class="description"><strong>Variables:</strong><br>
         {game_username}, {steam_id}, {billing_first_name}, {billing_last_name}, {billing_email}, {order_id}</p>
         <p class="description"><strong>Exemples Valheim:</strong><br>
         <code>broadcast Bienvenue {billing_first_name} !</code><br>
@@ -624,8 +653,6 @@ JS;
         update_post_meta($post_id, '_server_game_rcon_server', $server_sel);
     }
 
-    /* ---------------- Order UI: manual send button & history ---------------- */
-
     public function render_order_manual_send_button($order) {
         if (!current_user_can('manage_woocommerce')) return;
         
@@ -643,9 +670,9 @@ JS;
                 echo ' le ' . esc_html(date('d/m/Y à H:i', strtotime($sent_at)));
             }
             echo '</span>';
-            echo '<br><button class="button button-secondary server-game-reset-rcon" data-order-id="'.esc_attr($order_id).'" style="margin-top:5px;">Réinitialiser statut envoi</button>';
+            echo '<br><button class="button button-secondary server-game-reset-rcon" data-order-id="'.esc_attr($order_id).'" style="margin-top:5px;">Réinitialiser statut</button>';
         } else {
-            echo ' <span style="color:orange;">⚠️ Pas encore envoyé automatiquement</span>';
+            echo ' <span style="color:orange;">⚠️ Pas encore envoyé</span>';
         }
         echo '</div>';
     }
@@ -662,7 +689,6 @@ JS;
         echo '<div style="background:#f9f9f9;border:1px solid #e1e1e1;padding:8px;margin-top:8px;">';
         echo '<strong>Historique RCON :</strong><ul style="margin:0 0 0 18px;">';
         
-        // Show only last 10 entries to avoid cluttering
         $recent_logs = array_slice($logs, -10);
         foreach ($recent_logs as $entry) {
             $time = esc_html($entry['time'] ?? '');
@@ -673,20 +699,23 @@ JS;
         echo '</ul></div>';
     }
 
-    /* ---------------- Universal hook for HPOS/legacy ---------------- */
-
+    // FIX: Lock atomique avec flock()
     public function maybe_send_rcon($order_id, $old_status, $new_status, $order) {
         $status = str_replace('wc-', '', (string) $new_status);
         
-        // Improved lock using transients (more reliable than wp_cache)
-        $lock_key = 'server_game_rcon_lock_' . $order_id;
-        if (get_transient($lock_key)) {
-            $this->debug_log("RCON already processing for order {$order_id}, skipping duplicate", null, 'INFO');
+        $lock_file = sys_get_temp_dir() . '/rcon_lock_' . $order_id . '.lock';
+        $lock_handle = @fopen($lock_file, 'c');
+        
+        if (!$lock_handle) {
+            $this->debug_log("Could not create lock file for order {$order_id}", null, 'ERROR');
             return;
         }
         
-        // Set lock for 2 minutes
-        set_transient($lock_key, time(), 120);
+        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
+            $this->debug_log("RCON already processing for order {$order_id}, skipping", null, 'INFO');
+            fclose($lock_handle);
+            return;
+        }
         
         try {
             if ($status === 'completed') {
@@ -700,24 +729,24 @@ JS;
                         return;
                     }
                     
-                    $this->debug_log("Sending grouped RCON for order {$order_id} (status: {$old_status} → {$new_status})", null, 'INFO');
+                    $this->debug_log("Sending RCON for order {$order_id} ({$old_status} → {$new_status})", null, 'INFO');
                     $success = $this->send_rcon_commands_grouped($order);
                     
                     if ($success) {
                         $this->set_order_meta($order, '_server_game_rcon_sent', 'yes');
                         $this->set_order_meta($order, '_server_game_rcon_sent_at', current_time('mysql'));
-                        $this->debug_log("RCON successfully sent and marked for order {$order_id}", null, 'INFO');
+                        $this->debug_log("RCON successfully sent for order {$order_id}", null, 'INFO');
                     }
                 } else {
                     $this->debug_log("ERROR: Unable to load WC_Order for order_id={$order_id}", null, 'ERROR');
                 }
             }
         } finally {
-            delete_transient($lock_key);
+            flock($lock_handle, LOCK_UN);
+            fclose($lock_handle);
+            @unlink($lock_file);
         }
     }
-
-    /* ---------------- Helper methods for HPOS/legacy compatibility ---------------- */
 
     private function get_order_id($order) {
         return is_object($order) ? $order->get_id() : intval($order);
@@ -751,8 +780,6 @@ JS;
             delete_post_meta($order_id, $meta_key);
         }
     }
-
-    /* ---------------- AJAX handlers with improved security ---------------- */
 
     public function ajax_test_rcon_connection() {
         check_ajax_referer('server_game_test_rcon_nonce', 'nonce');
@@ -789,7 +816,6 @@ JS;
         $order = wc_get_order($order_id);
         if (!$order) wp_send_json_error(['message' => 'Commande introuvable']);
         
-        // Reset status temporarily to force resend
         $this->delete_order_meta($order, '_server_game_rcon_sent');
         
         $ok = $this->send_rcon_commands_grouped($order, true);
@@ -820,7 +846,7 @@ JS;
         $this->delete_order_meta($order, '_server_game_rcon_sent_method');
         
         $this->debug_log("RCON status reset for order {$order_id} by admin", null, 'INFO');
-        wp_send_json_success(['message' => 'Statut d\'envoi RCON réinitialisé']);
+        wp_send_json_success(['message' => 'Statut réinitialisé']);
     }
 
     public function ajax_clear_logs() {
@@ -835,8 +861,6 @@ JS;
         
         wp_send_json_success(['message' => 'Logs vidés']);
     }
-
-    /* ---------------- Core: improved grouped gather & send ---------------- */
 
     public function send_rcon_commands_grouped($order_input, $manual = false) {
         $order = $order_input instanceof WC_Order ? $order_input : wc_get_order($order_input);
@@ -879,7 +903,6 @@ JS;
     private function get_configured_servers($opts) {
         $servers = $opts['servers'] ?? [];
         
-        // Legacy migration
         if (empty($servers) && !empty($opts['host']) && !empty($opts['password'])) {
             $servers[] = [
                 'name' => 'Default',
@@ -954,7 +977,8 @@ JS;
 
     private function fallback_to_first_server(&$commands_by_server, $servers, $entry) {
         if (!empty($servers)) {
-            $first_server = array_key_first($servers);
+            reset($servers);
+            $first_server = key($servers);
             if (!isset($commands_by_server[$first_server])) {
                 $commands_by_server[$first_server] = [];
             }
@@ -997,6 +1021,7 @@ JS;
         }
     }
 
+    // FIX: Garantir fermeture socket dans finally
     private function process_server_commands($srv, $si, $entries, $order_id) {
         $server_name = $srv['name'] ?? "Server-{$si}";
         $host = $srv['host'] ?? '';
@@ -1007,7 +1032,7 @@ JS;
         $result = ['sent' => 0, 'errors' => []];
         
         if (empty($host) || empty($password)) {
-            $error_msg = "Server {$server_name} (#{$si}) misconfigured - missing host or password";
+            $error_msg = "Server {$server_name} (#{$si}) misconfigured";
             $result['errors'][] = $error_msg;
             $this->debug_log($error_msg, null, 'ERROR');
             return $result;
@@ -1024,56 +1049,70 @@ JS;
         }
 
         $connection = $fp['connection'];
-        $auth_result = $this->authenticate_rcon_connection($connection, $password, $server_name);
         
-        if (!$auth_result['success']) {
-            fclose($connection);
-            $error_msg = "Authentication failed to {$server_name}: " . $auth_result['error'];
-            $result['errors'][] = $error_msg;
-            $this->save_order_history($order_id, false, $error_msg);
-            return $result;
-        }
-
-        foreach ($entries as $ent) {
-            $cmd_result = $this->send_single_rcon_command($connection, $ent['command'], $server_name, $timeout);
+        try {
+            $auth_result = $this->authenticate_rcon_connection($connection, $password, $server_name);
             
-            if ($cmd_result['success']) {
-                $result['sent']++;
-                $success_msg = "✅ {$server_name}: {$ent['raw']} → {$ent['command']}";
-                $this->save_order_history($order_id, true, $success_msg);
-                $this->debug_log("Command executed successfully on {$server_name}: {$ent['command']}", null, 'INFO');
-            } else {
-                $error_msg = "❌ {$server_name}: Failed '{$ent['command']}' - " . $cmd_result['error'];
+            if (!$auth_result['success']) {
+                $error_msg = "Authentication failed to {$server_name}: " . $auth_result['error'];
                 $result['errors'][] = $error_msg;
                 $this->save_order_history($order_id, false, $error_msg);
-                $this->debug_log($error_msg, null, 'ERROR');
+                return $result;
+            }
+
+            foreach ($entries as $ent) {
+                $cmd_result = $this->send_single_rcon_command($connection, $ent['command'], $server_name, $timeout);
+                
+                if ($cmd_result['success']) {
+                    $result['sent']++;
+                    $success_msg = "✅ {$server_name}: {$ent['raw']} → {$ent['command']}";
+                    $this->save_order_history($order_id, true, $success_msg);
+                    $this->debug_log("Command executed successfully on {$server_name}: {$ent['command']}", null, 'INFO');
+                } else {
+                    $error_msg = "❌ {$server_name}: Failed '{$ent['command']}' - " . $cmd_result['error'];
+                    $result['errors'][] = $error_msg;
+                    $this->save_order_history($order_id, false, $error_msg);
+                    $this->debug_log($error_msg, null, 'ERROR');
+                }
+            }
+        } finally {
+            if (is_resource($connection)) {
+                @fclose($connection);
             }
         }
         
-        fclose($connection);
         return $result;
     }
 
+    // FIX: Nettoyage ressources et pas de fuite
     private function establish_rcon_connection($host, $port, $timeout) {
         $max_attempts = 2;
+        $fp = null;
+        
         for ($attempt = 1; $attempt <= $max_attempts; $attempt++) {
             $this->debug_log("Connection attempt {$attempt}/{$max_attempts} to {$host}:{$port}", null, 'INFO');
             
+            $errno = 0;
+            $errstr = '';
             $fp = @stream_socket_client("tcp://{$host}:{$port}", $errno, $errstr, $timeout);
             
-            if ($fp) {
+            if ($fp !== false) {
                 if (stream_set_timeout($fp, $timeout)) {
                     return ['success' => true, 'connection' => $fp];
                 } else {
-                    fclose($fp);
+                    @fclose($fp);
                     return ['success' => false, 'error' => 'Failed to set timeout'];
                 }
             }
             
             if ($attempt < $max_attempts) {
-                $this->debug_log("Connection failed, retrying... Error: {$errstr} ({$errno})", null, 'WARNING');
+                $this->debug_log("Connection failed: {$errstr} ({$errno}), retrying...", null, 'WARNING');
                 sleep(1);
             }
+        }
+        
+        if (is_resource($fp)) {
+            @fclose($fp);
         }
         
         return ['success' => false, 'error' => "{$errstr} ({$errno})"];
@@ -1104,8 +1143,6 @@ JS;
         }
     }
 
-    /* ---------------- Variable replacement with validation ---------------- */
-
     public function replace_variables($command, $order, $product_id = 0) {
         if (!is_object($order)) {
             $order = wc_get_order($order);
@@ -1119,10 +1156,8 @@ JS;
             '{game_username}' => $this->sanitize_game_username($this->get_order_meta($order, '_game_username')),
             '{steam_id}' => $this->sanitize_steam_id($this->get_order_meta($order, '_steam_id')),
         ];
-        
+
         $command = strtr($command, $repl);
-        
-        // Additional security: remove potentially dangerous characters (but keep quotes for Valheim)
         $command = preg_replace('/[;&|`$(){}[\]<>]/', '', $command);
         
         return trim($command);
@@ -1130,17 +1165,13 @@ JS;
 
     private function sanitize_game_username($username) {
         $username = sanitize_text_field($username);
-        // Allow only alphanumeric, underscore, dash, and dot
         return preg_replace('/[^a-zA-Z0-9_.-]/', '', $username);
     }
 
     private function sanitize_steam_id($steam_id) {
         $steam_id = sanitize_text_field($steam_id);
-        // SteamID64 is 17 digits
         return preg_replace('/[^0-9]/', '', $steam_id);
     }
-
-    /* ---------------- Order history with size limit ---------------- */
 
     private function save_order_history($order_id, $success, $message, $product_id = 0, $command = '', $response = '') {
         $order = is_object($order_id) ? $order_id : wc_get_order($order_id);
@@ -1149,7 +1180,6 @@ JS;
         $logs = $this->get_order_meta($order, $this->history_meta);
         if (!is_array($logs)) $logs = [];
         
-        // Limit history size
         if (count($logs) >= $this->max_history_entries) {
             $logs = array_slice($logs, -($this->max_history_entries - 1));
         }
@@ -1166,23 +1196,20 @@ JS;
         $this->set_order_meta($order ?: $order_id_int, $this->history_meta, $logs);
     }
 
-    /* ---------------- Retry mechanism ---------------- */
-
     public function retry_failed_commands($order_id) {
         $this->debug_log("Retry fired for order {$order_id}");
         $this->send_rcon_commands_grouped($order_id);
     }
 
-    /* ---------------- Improved RCON protocol handlers ---------------- */
-
+    // FIX: Timeout précis avec microtime(true)
     private function read_rcon_response_safe($fp, $timeout = 10) {
-        $start_time = time();
+        $start_time = microtime(true);
         $header = '';
         
-        while (strlen($header) < 4 && (time() - $start_time) < $timeout) {
+        while (strlen($header) < 4 && (microtime(true) - $start_time) < $timeout) {
             $chunk = @fread($fp, 4 - strlen($header));
             if ($chunk === false || $chunk === '') {
-                usleep(10000); // 10ms
+                usleep(10000);
                 continue;
             }
             $header .= $chunk;
@@ -1198,7 +1225,7 @@ JS;
         }
         
         $payload = '';
-        while (strlen($payload) < $size && (time() - $start_time) < $timeout) {
+        while (strlen($payload) < $size && (microtime(true) - $start_time) < $timeout) {
             $chunk = @fread($fp, $size - strlen($payload));
             if ($chunk === false || $chunk === '') {
                 usleep(10000);
@@ -1262,11 +1289,11 @@ JS;
             return $cmd_result;
             
         } finally {
-            fclose($fp);
+            if (is_resource($fp)) {
+                @fclose($fp);
+            }
         }
     }
-
-    /* ---------------- Admin columns with HPOS compatibility ---------------- */
 
     public function add_order_columns($columns) {
         $columns['rcon_status'] = __('RCON', 'wc-server-game-rcon');
@@ -1300,8 +1327,6 @@ JS;
         }
     }
 
-    /* ---------------- Enhanced checkout fields ---------------- */
-
     private function is_username_field_enabled() {
         $opts = get_option($this->option_name, []);
         return !empty($opts['enable_username_field']);
@@ -1315,7 +1340,6 @@ JS;
     public function add_billing_custom_fields($checkout) {
         echo '<div id="server_game_rcon_fields">';
         
-        // Game username field
         if ($this->is_username_field_enabled()) {
             woocommerce_form_field('game_username', [
                 'type' => 'text',
@@ -1332,7 +1356,6 @@ JS;
             ], $checkout->get_value('game_username'));
         }
         
-        // SteamID field for Valheim
         if ($this->is_steamid_field_enabled()) {
             woocommerce_form_field('steam_id', [
                 'type' => 'text',
@@ -1340,7 +1363,7 @@ JS;
                 'label' => __('SteamID64 *'),
                 'placeholder' => __('Votre SteamID64 (17 chiffres)'),
                 'required' => true,
-                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank">steamid.io</a>. Nécessaire pour les commandes admin Valheim.'),
+                'description' => __('Trouvez votre SteamID64 sur <a href="https://steamid.io/" target="_blank">steamid.io</a>'),
                 'custom_attributes' => [
                     'maxlength' => '17',
                     'pattern' => '[0-9]{17}',
@@ -1352,8 +1375,8 @@ JS;
         echo '</div>';
     }
 
+    // FIX: Remplacement de str_starts_with() pour PHP 7.4
     public function validate_game_username() {
-        // Validate game username if enabled
         if ($this->is_username_field_enabled()) {
             if (empty($_POST['game_username'])) {
                 wc_add_notice(__('Le nom d\'utilisateur de jeu est requis.'), 'error');
@@ -1373,7 +1396,6 @@ JS;
             }
         }
         
-        // Validate SteamID if enabled
         if ($this->is_steamid_field_enabled()) {
             if (empty($_POST['steam_id'])) {
                 wc_add_notice(__('Le SteamID64 est requis.'), 'error');
@@ -1387,14 +1409,13 @@ JS;
                 return;
             }
             
-            // Basic SteamID64 validation (should start with 7656119)
-            if (!str_starts_with($steam_id, '7656119')) {
+            // FIX: Remplacement de str_starts_with() pour PHP 7.4
+            if (strpos($steam_id, '7656119') !== 0) {
                 wc_add_notice(__('Le SteamID64 semble invalide. Il doit commencer par 7656119.'), 'error');
                 return;
             }
         }
         
-        // Player verification (not recommended for Valheim)
         if ($this->is_username_field_enabled() && $this->should_verify_player_exists()) {
             $username = sanitize_text_field($_POST['game_username']);
             $exists = $this->verify_player_exists_on_server($username);
@@ -1412,22 +1433,18 @@ JS;
     }
 
     public function save_custom_checkout_fields_new($order, $data) {
-        // Save game username if enabled and submitted
         if ($this->is_username_field_enabled() && !empty($_POST['game_username'])) {
             $username = $this->sanitize_game_username($_POST['game_username']);
             $this->set_order_meta($order, '_game_username', $username);
             $this->set_order_meta($order, '_game_username_verified_at', current_time('mysql'));
         }
         
-        // Save SteamID if enabled and submitted
         if ($this->is_steamid_field_enabled() && !empty($_POST['steam_id'])) {
             $steam_id = $this->sanitize_steam_id($_POST['steam_id']);
             $this->set_order_meta($order, '_steam_id', $steam_id);
             $this->set_order_meta($order, '_steam_id_verified_at', current_time('mysql'));
         }
     }
-
-    /* ---------------- Player verification on server (not recommended for Valheim) ---------------- */
 
     private function should_verify_player_exists() {
         $opts = get_option($this->option_name, []);
@@ -1442,8 +1459,6 @@ JS;
             return ['success' => false, 'message' => 'Aucun serveur configuré'];
         }
         
-        // Note: Valheim RCON doesn't support player listing
-        // This function will attempt connection but won't verify player existence reliably
         foreach ($servers as $server) {
             $host = $server['host'] ?? '';
             $port = intval($server['port'] ?? 2457);
@@ -1452,12 +1467,9 @@ JS;
             
             if (empty($host) || empty($password)) continue;
             
-            // Try 'info' command (Valheim compatible)
             $result = $this->execute_rcon_command($host, $port, $password, 'info', $timeout);
             
             if ($result['success']) {
-                // Valheim doesn't provide player lists via RCON
-                // If we can connect, assume player verification is OK
                 return ['success' => true, 'player_found' => true, 'note' => 'Valheim ne supporte pas la vérification de joueur via RCON'];
             }
         }
@@ -1465,19 +1477,14 @@ JS;
         return ['success' => false, 'message' => 'Impossible de se connecter aux serveurs'];
     }
 
-    /* ---------------- Debug option helper ---------------- */
-
     public function is_debug_enabled() {
         $options = get_option($this->option_name, []);
         return !empty($options['debug']);
     }
 }
 
-} // Close class existence check
+}
 
-/**
- * Classe pour la mise à jour GitHub adaptée pour Server Game RCON
- */
 class ServerGameRCONGitHubUpdater {
     private $file;
     private $plugin;
@@ -1503,8 +1510,6 @@ class ServerGameRCONGitHubUpdater {
             add_filter('pre_set_site_transient_update_plugins', [$this, 'modifyTransient'], 10, 1);
             add_filter('plugins_api', [$this, 'pluginPopup'], 10, 3);
             add_filter('upgrader_post_install', [$this, 'afterInstall'], 10, 3);
-            
-            // Ajouter une notification de mise à jour dans l'admin
             add_action('admin_notices', [$this, 'updateNotice']);
         }
     }
@@ -1615,12 +1620,12 @@ class ServerGameRCONGitHubUpdater {
         return !empty($this->github_response['tag_name']) ? ltrim($this->github_response['tag_name'], 'v') : false;
     }
     
+    // FIX: Validation JSON avec json_last_error()
     private function getRepositoryInfo() {
         if ($this->github_response !== null) {
             return;
         }
         
-        // Cache la réponse GitHub pour éviter les requêtes multiples
         $cache_key = 'server_game_rcon_github_' . md5($this->github_user . $this->github_repo);
         $cached_response = get_transient($cache_key);
         
@@ -1639,11 +1644,15 @@ class ServerGameRCONGitHubUpdater {
         
         if (!is_wp_error($response) && wp_remote_retrieve_response_code($response) === 200) {
             $this->github_response = json_decode(wp_remote_retrieve_body($response), true);
-            // Cache pendant 12 heures
-            set_transient($cache_key, $this->github_response, 12 * HOUR_IN_SECONDS);
+            
+            if (json_last_error() === JSON_ERROR_NONE) {
+                set_transient($cache_key, $this->github_response, 12 * HOUR_IN_SECONDS);
+            } else {
+                $this->github_response = false;
+                set_transient($cache_key, false, HOUR_IN_SECONDS);
+            }
         } else {
             $this->github_response = false;
-            // Cache l'échec pendant 1 heure pour éviter les requêtes répétées
             set_transient($cache_key, false, HOUR_IN_SECONDS);
         }
     }
@@ -1662,24 +1671,18 @@ class ServerGameRCONGitHubUpdater {
         $this->getRepositoryInfo();
         $changelog = !empty($this->github_response['body']) ? $this->github_response['body'] : 'Pas de notes de version disponibles.';
         
-        // Nettoyer le changelog pour l'affichage dans WordPress
         $changelog = wp_kses_post($changelog);
-        
-        // Convertir le markdown basique en HTML
         $changelog = preg_replace('/^### (.+)$/m', '<h3>$1</h3>', $changelog);
         $changelog = preg_replace('/^## (.+)$/m', '<h2>$1</h2>', $changelog);
         $changelog = preg_replace('/^# (.+)$/m', '<h1>$1</h1>', $changelog);
         $changelog = preg_replace('/^\* (.+)$/m', '<ul><li>$1</li></ul>', $changelog);
         $changelog = preg_replace('/^\- (.+)$/m', '<ul><li>$1</li></ul>', $changelog);
-        
-        // Nettoyer les listes consécutives
         $changelog = preg_replace('/<\/ul>\s*<ul>/', '', $changelog);
         
         return $changelog;
     }
 }
 
-// Initialisation du plugin
 add_action('plugins_loaded', function() {
     if (class_exists('WooCommerce')) {
         new WC_Server_Game_RCON();
@@ -1690,15 +1693,19 @@ add_action('plugins_loaded', function() {
     }
 });
 
-// Hook de désactivation pour nettoyer les caches
+// FIX: Nettoyage SQL sécurisé avec $wpdb->prepare()
 register_deactivation_hook(__FILE__, function() {
+    global $wpdb;
+    
     wp_clear_scheduled_hook('server_game_rcon_cleanup_logs');
     wp_clear_scheduled_hook('server_game_rcon_retry_failed');
     
-    // Nettoyer les caches GitHub
-    global $wpdb;
-    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_server_game_rcon_github_%'");
-    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_timeout_server_game_rcon_github_%'");
+    $wpdb->query(
+        $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
+            $wpdb->esc_like('_transient_server_game_rcon_github_') . '%',
+            $wpdb->esc_like('_transient_timeout_server_game_rcon_github_') . '%'
+        )
+    );
 });
-
 ?>
