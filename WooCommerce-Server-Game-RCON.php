@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce Server Game RCON
  * Description: Server Game RCON - HPOS compatible, grouped sends, dynamic variables, per-order history, debug mode - Optimisé pour Valheim
- * Version: 1.0.4
+ * Version: 1.0.3
  * Author: Skylide
  * Requires PHP: 7.4
  * GitHub Plugin URI: skylidefr/WooCommerce-Server-Game-RCON
